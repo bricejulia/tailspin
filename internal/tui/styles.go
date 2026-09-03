@@ -46,6 +46,10 @@ var (
 			Bold(true).
 			Foreground(colorError)
 
+	warningStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(colorWarning)
+
 	statusStyle = lipgloss.NewStyle().
 			Foreground(colorMuted)
 

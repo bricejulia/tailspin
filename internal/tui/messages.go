@@ -17,3 +17,21 @@ type projectSwitchedMsg struct {
 	project string
 	err     error
 }
+
+// tailStartedMsg reports the result of opening a live tail stream. gen
+// identifies which tail session this belongs to (see appModel.tailGen) so
+// a stale start/event from a session the user has already left doesn't get
+// applied to whatever's current.
+type tailStartedMsg struct {
+	gen    int
+	events <-chan gcplog.TailEvent
+	cancel func()
+	err    error
+}
+
+// tailEventMsg delivers one event from an active tail stream's channel,
+// via waitForTailEvent.
+type tailEventMsg struct {
+	gen   int
+	event gcplog.TailEvent
+}

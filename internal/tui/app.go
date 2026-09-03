@@ -52,6 +52,15 @@ type appModel struct {
 	detail    detailModel
 	filterBar filterBarModel
 	command   commandModel
+	tail      tailModel
+
+	// tailGen identifies the current tail session; tailStartedMsg/
+	// tailEventMsg carry the gen they belong to, so a message from a
+	// session the user has already left (stopped, or started another)
+	// is silently ignored instead of resurrecting stale state.
+	tailGen    int
+	tailCancel func()
+	tailEvents <-chan gcplog.TailEvent
 
 	err    error // fatal: takes over the whole screen (modeError)
 	notice string // transient: shown in the header, doesn't change mode
@@ -73,6 +82,7 @@ func New(client gcplog.Client, project string) appModel {
 		detail:    newDetailModel(),
 		filterBar: newFilterBarModel(),
 		command:   newCommandModel(),
+		tail:      newTailModel(),
 	}
 }
 
@@ -86,6 +96,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.list.SetSize(m.width, m.contentHeight())
 		m.detail.SetSize(m.width, m.contentHeight())
+		m.tail.SetSize(m.width, m.contentHeight())
 		return m, nil
 
 	case tea.KeyPressMsg:
@@ -105,6 +116,12 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case projectSwitchedMsg:
 		return m.handleProjectSwitched(msg)
+
+	case tailStartedMsg:
+		return m.handleTailStarted(msg)
+
+	case tailEventMsg:
+		return m.handleTailEvent(msg)
 	}
 
 	return m, nil
@@ -163,8 +180,11 @@ func (m appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case key.Matches(msg, keys.Tail):
 		m.mode = modeTail
-		return m, nil
+		return m.startTail()
 	case key.Matches(msg, keys.Back):
+		if m.mode == modeTail {
+			m = m.stopTail()
+		}
 		if m.mode == modeTail || m.mode == modeDetail {
 			m.mode = modeBrowse
 		}
@@ -175,6 +195,11 @@ func (m appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.detail.show(entry)
 				m.mode = modeDetail
 			}
+		}
+		return m, nil
+	case key.Matches(msg, keys.Refresh):
+		if m.mode == modeBrowse {
+			return m, m.fetchPage("", false)
 		}
 		return m, nil
 	}
@@ -193,6 +218,9 @@ func (m appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.detail, cmd = m.detail.Update(msg)
 		return m, cmd
+	case modeTail:
+		m.tail = m.tail.Update(msg)
+		return m, nil
 	}
 	return m, nil
 }
@@ -214,11 +242,14 @@ func (m appModel) handleEntriesLoaded(msg entriesLoadedMsg) (tea.Model, tea.Cmd)
 func (m appModel) handleCommand(cmd parsedCommand) (tea.Model, tea.Cmd) {
 	switch cmd.Kind {
 	case cmdBrowse:
+		if m.mode == modeTail {
+			m = m.stopTail()
+		}
 		m.mode = modeBrowse
 		return m, nil
 	case cmdTail:
 		m.mode = modeTail
-		return m, nil
+		return m.startTail()
 	case cmdHelp:
 		m.mode = modeHelp
 		return m, nil
@@ -237,6 +268,7 @@ func (m appModel) handleProjectSwitched(msg projectSwitchedMsg) (tea.Model, tea.
 		m.notice = "project switch failed: " + msg.err.Error()
 		return m, nil
 	}
+	m = m.stopTail()
 	if m.client != nil {
 		_ = m.client.Close()
 	}
@@ -246,6 +278,80 @@ func (m appModel) handleProjectSwitched(msg projectSwitchedMsg) (tea.Model, tea.
 	m.notice = ""
 	m.mode = modeBrowse
 	return m, m.fetchPage("", false)
+}
+
+// startTail begins a new tail session: stops any previous one, clears the
+// tail view, and kicks off the async open-stream Cmd.
+func (m appModel) startTail() (tea.Model, tea.Cmd) {
+	m = m.stopTail()
+	m.tail.reset()
+	return m, m.startTailCmd(m.tailGen)
+}
+
+// stopTail cancels the active tail stream, if any, and bumps tailGen so any
+// tailStartedMsg/tailEventMsg still in flight for it is ignored on arrival.
+func (m appModel) stopTail() appModel {
+	if m.tailCancel != nil {
+		m.tailCancel()
+	}
+	m.tailCancel = nil
+	m.tailEvents = nil
+	m.tailGen++
+	return m
+}
+
+// startTailCmd opens a live tail stream for gen. Run as a tea.Cmd since
+// TailEntries does a blocking RPC call to establish the stream.
+func (m appModel) startTailCmd(gen int) tea.Cmd {
+	client, filter := m.client, m.filter
+	return func() tea.Msg {
+		events, cancel, err := client.TailEntries(context.Background(), filter)
+		return tailStartedMsg{gen: gen, events: events, cancel: cancel, err: err}
+	}
+}
+
+// waitForTailEvent returns a Cmd that blocks for the next event on events —
+// the standard Bubble Tea "listen on a channel forever" pattern: the tail
+// event handler re-issues this after every tailEventMsg it receives, so
+// the goroutine reading the channel lives entirely inside Cmds rather than
+// writing to shared state from the outside.
+func waitForTailEvent(gen int, events <-chan gcplog.TailEvent) tea.Cmd {
+	return func() tea.Msg {
+		ev, ok := <-events
+		if !ok {
+			return nil
+		}
+		return tailEventMsg{gen: gen, event: ev}
+	}
+}
+
+func (m appModel) handleTailStarted(msg tailStartedMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != m.tailGen {
+		if msg.cancel != nil {
+			msg.cancel() // belongs to a session we've already left
+		}
+		return m, nil
+	}
+	if msg.err != nil {
+		m.notice = "tail failed: " + msg.err.Error()
+		m.mode = modeBrowse
+		return m, nil
+	}
+	m.tailCancel = msg.cancel
+	m.tailEvents = msg.events
+	return m, waitForTailEvent(msg.gen, msg.events)
+}
+
+func (m appModel) handleTailEvent(msg tailEventMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != m.tailGen {
+		return m, nil
+	}
+	if msg.event.Err != nil {
+		m.notice = "tail stream ended: " + msg.event.Err.Error()
+		return m, nil // don't re-issue the wait — the channel is closed
+	}
+	m.tail.appendEntry(msg.event.Entry)
+	return m, waitForTailEvent(msg.gen, m.tailEvents)
 }
 
 // contentHeight is the terminal height available to the list/detail view,
@@ -296,7 +402,7 @@ func (m appModel) View() tea.View {
 	case modeDetail:
 		body = m.detail.View()
 	case modeTail:
-		body = statusStyle.Render("tail mode — live streaming lands in M5. esc to go back.")
+		body = m.tail.View()
 	default:
 		body = m.list.View()
 	}

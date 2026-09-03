@@ -179,21 +179,27 @@ func (m *listModel) render() {
 // severityColWidth fits the longest severity name ("EMERGENCY").
 const severityColWidth = 9
 
-// renderRow renders entry i as one or more physical lines, depending on
-// wrap mode.
+// entryPrefix renders the fixed-width timestamp/severity/log-name columns
+// shared by every row-based view (the browse list and the tail stream).
 //
 // It never applies lipgloss's Style.Width to a string that might already be
 // at or over that width: Width(n) doesn't just pad short content, it wraps
 // (reflows) anything longer than n — exactly the multi-line-row bug this
 // was built to avoid. Columns are padded manually with padToWidth instead,
 // and styles are applied with plain Render (no Width) throughout.
-func (m listModel) renderRow(i int, e gcplog.Entry) []string {
+func entryPrefix(e gcplog.Entry) string {
 	sevStyle := severityStyle(e.Severity)
-	prefix := fmt.Sprintf("%s  %s  %s  ",
+	return fmt.Sprintf("%s  %s  %s  ",
 		e.Timestamp.Local().Format("15:04:05"),
 		sevStyle.Render(padToWidth(strings.ToUpper(e.Severity.String()), severityColWidth)),
 		lipgloss.NewStyle().Foreground(colorMuted).Render(padToWidth(truncate(shortLogName(e.LogName), 28), 28)),
 	)
+}
+
+// renderRow renders entry i as one or more physical lines, depending on
+// wrap mode.
+func (m listModel) renderRow(i int, e gcplog.Entry) []string {
+	prefix := entryPrefix(e)
 	prefixWidth := lipgloss.Width(prefix)
 
 	var rowLines []string

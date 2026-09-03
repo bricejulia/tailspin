@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 
+	apiv2 "cloud.google.com/go/logging/apiv2"
 	"cloud.google.com/go/logging/logadmin"
 )
 
@@ -37,10 +38,15 @@ type Client interface {
 }
 
 // client is the real Client implementation, backed by the Cloud Logging
-// client libraries.
+// client libraries: logadmin for paged historical queries, and the
+// lower-level generated apiv2 client for TailLogEntries — the streaming
+// tail RPC isn't exposed by logadmin or the high-level logging package, and
+// requires gRPC transport (which both clients use by default here; neither
+// is constructed with any REST-forcing option).
 type client struct {
 	project string
 	admin   *logadmin.Client
+	stream  *apiv2.Client
 }
 
 // NewClient creates a Client for the given GCP project, using Application
@@ -51,9 +57,18 @@ func NewClient(ctx context.Context, project string) (Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating Cloud Logging client for project %q: %w", project, err)
 	}
-	return &client{project: project, admin: admin}, nil
+	stream, err := apiv2.NewClient(ctx)
+	if err != nil {
+		_ = admin.Close()
+		return nil, fmt.Errorf("creating Cloud Logging streaming client for project %q: %w", project, err)
+	}
+	return &client{project: project, admin: admin, stream: stream}, nil
 }
 
 func (c *client) Close() error {
-	return c.admin.Close()
+	err := c.admin.Close()
+	if streamErr := c.stream.Close(); err == nil {
+		err = streamErr
+	}
+	return err
 }

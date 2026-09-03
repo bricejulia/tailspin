@@ -16,6 +16,7 @@ type keyMap struct {
 	Command  key.Binding
 	Tail     key.Binding
 	Wrap     key.Binding
+	Refresh  key.Binding
 	Help     key.Binding
 	Quit     key.Binding
 }
@@ -68,6 +69,10 @@ var keys = keyMap{
 	Wrap: key.NewBinding(
 		key.WithKeys("w"),
 		key.WithHelp("w", "wrap"),
+	),
+	Refresh: key.NewBinding(
+		key.WithKeys("r"),
+		key.WithHelp("r", "refresh"),
 	),
 	Help: key.NewBinding(
 		key.WithKeys("?"),

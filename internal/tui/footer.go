@@ -15,8 +15,10 @@ func (m appModel) renderFooter() string {
 		bindings = []key.Binding{keys.Quit}
 	case modeDetail:
 		bindings = []key.Binding{keys.Up, keys.Down, keys.PageUp, keys.PageDown, keys.Back, keys.Quit}
+	case modeTail:
+		bindings = []key.Binding{pauseKey, keys.Up, keys.Down, keys.Back, keys.Quit}
 	default:
-		bindings = []key.Binding{keys.Up, keys.Down, keys.Enter, keys.Filter, keys.Command, keys.Tail, keys.Wrap, keys.Help, keys.Quit}
+		bindings = []key.Binding{keys.Up, keys.Down, keys.Enter, keys.Filter, keys.Command, keys.Tail, keys.Wrap, keys.Refresh, keys.Help, keys.Quit}
 	}
 
 	var out strings.Builder

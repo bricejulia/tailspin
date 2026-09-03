@@ -17,10 +17,17 @@ func (m appModel) renderHeader() string {
 		middle = errorStyle.Render(m.notice)
 	}
 
-	right := headerMetaStyle.Render(fmt.Sprintf("%d entries", len(m.list.entries)))
+	entryCount := len(m.list.entries)
+	live := ""
 	if m.mode == modeTail {
-		right = liveStyle.Render("● LIVE") + "  " + right
+		entryCount = len(m.tail.entries)
+		if m.tail.paused {
+			live = warningStyle.Render("‖ PAUSED") + "  "
+		} else {
+			live = liveStyle.Render("● LIVE") + "  "
+		}
 	}
+	right := live + headerMetaStyle.Render(fmt.Sprintf("%d entries", entryCount))
 
 	bar := lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", middle)
 	return padBetween(bar, right, m.width)
