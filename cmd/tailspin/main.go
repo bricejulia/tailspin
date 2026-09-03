@@ -8,8 +8,11 @@ import (
 	"fmt"
 	"os"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/bricejulia/tailspin/internal/config"
 	"github.com/bricejulia/tailspin/internal/gcplog"
+	"github.com/bricejulia/tailspin/internal/tui"
 )
 
 // version is overridable at build time via -ldflags "-X main.version=...".
@@ -44,31 +47,9 @@ func run() error {
 	}
 	defer client.Close()
 
-	// M1 milestone: prove the GCP wiring end-to-end with a plain-text
-	// dump of the first page. The Bubble Tea TUI replaces this in M2+.
-	page, err := client.ListEntries(ctx, gcplog.FilterState{}, "", 25)
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("tailspin %s — project %s — %d entries\n\n", version, project, len(page.Entries))
-	for _, e := range page.Entries {
-		fmt.Printf("%s  %-8s  %-30s  %s\n",
-			e.Timestamp.Local().Format("2006-01-02 15:04:05"),
-			e.Severity,
-			truncate(e.LogName, 30),
-			e.Summary,
-		)
-	}
-	if page.NextPageToken != "" {
-		fmt.Println("\n(more entries available — pagination lands in M2)")
+	model := tui.New(client, project)
+	if _, err := tea.NewProgram(model).Run(); err != nil {
+		return fmt.Errorf("running tailspin: %w", err)
 	}
 	return nil
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n-1] + "…"
 }
