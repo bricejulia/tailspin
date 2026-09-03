@@ -24,11 +24,6 @@ func hscrollStep(width int) int {
 	return max(width/3, 10)
 }
 
-// gutterWidth is the left column reserved for the selection marker ("> ")
-// on the focused row, and matching blank space on every other row so
-// columns stay aligned.
-const gutterWidth = 2
-
 // listModel renders the scrollable, k9s-dense table of log entries and
 // tracks which row is selected. It owns no GCP client — appModel triggers
 // fetches and feeds results in via reset/appendPage.
@@ -134,7 +129,7 @@ func (m listModel) selectedRowEndOffset() int {
 	if !ok {
 		return 0
 	}
-	full := gutter(true) + entryPrefix(e) + e.Summary
+	full := "> " + entryPrefixPlain(e) + e.Summary
 	return lipgloss.Width(full) - m.width
 }
 
@@ -213,7 +208,12 @@ func (m listModel) Update(msg tea.Msg) (listModel, tea.Cmd) {
 		case !m.wrap && (keyMsg.String() == "left" || keyMsg.String() == "h"):
 			m.viewport.ScrollLeft(hscrollStep(m.width))
 		case !m.wrap && (keyMsg.String() == "right" || keyMsg.String() == "l"):
-			m.viewport.ScrollRight(hscrollStep(m.width))
+			// Clamped to the *focused* row's own end, not the viewport's
+			// default max (the globally-longest loaded line) — otherwise
+			// scrolling could run past the focused row's content into
+			// blank space whenever some unrelated row was much longer.
+			end := max(m.selectedRowEndOffset(), 0)
+			m.viewport.SetXOffset(min(m.viewport.XOffset()+hscrollStep(m.width), end))
 		case !m.wrap && (keyMsg.String() == "0" || keyMsg.String() == "home"):
 			m.viewport.SetXOffset(0)
 		case !m.wrap && (keyMsg.String() == "$" || keyMsg.String() == "end"):
@@ -303,8 +303,8 @@ func (m *listModel) render() {
 // severityColWidth fits the longest severity name ("EMERGENCY").
 const severityColWidth = 9
 
-// entryPrefix renders the fixed-width timestamp/severity/log-name columns
-// shared by every row-based view (the browse list and the tail stream).
+// entryPrefix renders the fixed-width timestamp/severity/log-name columns,
+// each individually colored. Used for every unselected row.
 //
 // It never applies lipgloss's Style.Width to a string that might already be
 // at or over that width: Width(n) doesn't just pad short content, it wraps
@@ -320,48 +320,77 @@ func entryPrefix(e gcplog.Entry) string {
 	)
 }
 
-// gutter renders the 2-column left margin: a colored marker on the
-// selected row, blank space otherwise, so the selection is visible even
-// where the background tint alone is subtle.
-func gutter(selected bool) string {
-	if selected {
-		return selectedMarkerStyle.Render(">") + " "
-	}
-	return strings.Repeat(" ", gutterWidth)
+// entryPrefixPlain renders the same columns as entryPrefix with no
+// per-column styling — used for the selected row.
+//
+// Nesting separately-Render()'d, self-resetting spans (like entryPrefix's)
+// inside an outer Style.Render call doesn't work: each inner span's own
+// closing "reset all" (\x1b[0m) also clears the outer style, cutting its
+// background short right after the first inner span ends. That's why only
+// the marker used to get a background, not the rest of the line. Building
+// the row from plain text and applying exactly one style over the whole
+// thing avoids that, at the cost of the selected row losing the
+// per-column severity/log-name coloring other rows have.
+func entryPrefixPlain(e gcplog.Entry) string {
+	return fmt.Sprintf("%s  %s  %s  ",
+		e.Timestamp.Local().Format("15:04:05"),
+		padToWidth(strings.ToUpper(e.Severity.String()), severityColWidth),
+		padToWidth(truncate(shortLogName(e.LogName), 28), 28),
+	)
 }
 
 // renderRow renders entry i as one or more physical lines: every row wraps
 // (or none do) together — see the wrap field doc for the two modes.
 func (m listModel) renderRow(i int, e gcplog.Entry) []string {
-	selected := i == m.selected
-	prefix := gutter(selected) + entryPrefix(e)
-	prefixWidth := lipgloss.Width(prefix)
+	if i == m.selected {
+		return m.renderSelectedRow(e)
+	}
 
-	var rowLines []string
+	prefix := "  " + entryPrefix(e)
 	if m.wrap {
-		// Every row reflows across as many lines as its message needs,
-		// continuation lines aligned under the message column.
-		avail := max(m.width-prefixWidth, 10)
-		indent := strings.Repeat(" ", prefixWidth)
-		for j, seg := range strings.Split(lipgloss.Wrap(e.Summary, avail, ""), "\n") {
-			if j == 0 {
-				rowLines = append(rowLines, prefix+seg)
-			} else {
-				rowLines = append(rowLines, indent+seg)
-			}
-		}
-	} else {
-		// Every row is one line, full content — h/l (0/$) scrolls the
-		// whole table horizontally to read whatever doesn't fit.
-		rowLines = []string{prefix + e.Summary}
+		return wrapRow(prefix, e.Summary, m.width)
 	}
+	// One line, full content — h/l (0/$) scrolls the whole table
+	// horizontally to read whatever doesn't fit.
+	return []string{prefix + e.Summary}
+}
 
-	if selected {
-		for j, line := range rowLines {
-			rowLines[j] = selectedRowStyle.Render(padToWidth(line, m.width))
+// renderSelectedRow renders the focused entry as plain text (see
+// entryPrefixPlain) so the single background+bold style applied at the
+// end covers the whole line, with no risk of an embedded reset cutting it
+// short partway through.
+func (m listModel) renderSelectedRow(e gcplog.Entry) []string {
+	prefix := "> " + entryPrefixPlain(e)
+
+	var lines []string
+	if m.wrap {
+		lines = wrapRow(prefix, e.Summary, m.width)
+	} else {
+		lines = []string{prefix + e.Summary}
+	}
+	for j, line := range lines {
+		lines[j] = selectedRowStyle.Render(padToWidth(line, m.width))
+	}
+	return lines
+}
+
+// wrapRow reflows summary across as many lines as it needs to fit within
+// width, given a prefix that's already rendered — continuation lines are
+// aligned under the message column with a blank indent of the same width.
+func wrapRow(prefix, summary string, width int) []string {
+	prefixWidth := lipgloss.Width(prefix)
+	avail := max(width-prefixWidth, 10)
+	indent := strings.Repeat(" ", prefixWidth)
+
+	var lines []string
+	for j, seg := range strings.Split(lipgloss.Wrap(summary, avail, ""), "\n") {
+		if j == 0 {
+			lines = append(lines, prefix+seg)
+		} else {
+			lines = append(lines, indent+seg)
 		}
 	}
-	return rowLines
+	return lines
 }
 
 // padToWidth right-pads s with spaces to width display columns. Content

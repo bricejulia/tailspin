@@ -79,8 +79,12 @@ func New(client gcplog.Client, project string) appModel {
 		// per-request from time.Now(), which would make the filter
 		// string drift between pages of the same paginated query and
 		// break the page token (see FilterState.Since).
-		filter:    gcplog.FilterState{Since: time.Now().Add(-defaultLookback)},
-		list:      newListModel(),
+		filter: gcplog.FilterState{Since: time.Now().Add(-defaultLookback)},
+		list: func() listModel {
+			l := newListModel()
+			l.loading = true // Init's fetch starts immediately; see triggerFetch
+			return l
+		}(),
 		detail:    newDetailModel(),
 		filterBar: newFilterBarModel(),
 		command:   newCommandModel(),
@@ -94,7 +98,9 @@ func New(client gcplog.Client, project string) appModel {
 }
 
 func (m appModel) Init() tea.Cmd {
-	return m.fetchPage("", false)
+	// list.loading is already true from New() — just start the fetch and
+	// the spinner tick loop together.
+	return tea.Batch(m.fetchPage("", false), m.spinner.Tick)
 }
 
 func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -116,7 +122,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.filter = msg.filter
 		m.notice = ""
 		m.mode = modeBrowse
-		return m, m.fetchPage("", false)
+		return m.triggerFetch("", false)
 
 	case commandSubmittedMsg:
 		return m.handleCommand(msg.cmd)
@@ -217,13 +223,13 @@ func (m appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.mode == modeBrowse || m.mode == modeError {
 			m.mode = modeBrowse
 			m.err = nil
-			return m, m.fetchPage("", false)
+			return m.triggerFetch("", false)
 		}
 		return m, nil
 	case key.Matches(msg, keys.NextPage):
 		if m.mode == modeBrowse {
 			if m.list.gotoNextPage() {
-				return m, tea.Batch(m.fetchPage(m.list.nextPageToken, true), m.spinner.Tick)
+				return m.triggerFetch(m.list.nextPageToken, true)
 			}
 		}
 		return m, nil
@@ -241,7 +247,9 @@ func (m appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.list, cmd = m.list.Update(msg)
 		if !wasLoading && m.list.loading {
 			// list_model just flagged that it wants the next page.
-			cmd = tea.Batch(cmd, m.fetchPage(m.list.nextPageToken, true), m.spinner.Tick)
+			var fetchCmd tea.Cmd
+			m, fetchCmd = m.triggerFetch(m.list.nextPageToken, true)
+			cmd = tea.Batch(cmd, fetchCmd)
 		}
 		return m, cmd
 	case modeDetail:
@@ -315,7 +323,7 @@ func (m appModel) handleProjectSwitched(msg projectSwitchedMsg) (tea.Model, tea.
 	m.filter = gcplog.FilterState{Since: time.Now().Add(-defaultLookback)}
 	m.notice = ""
 	m.mode = modeBrowse
-	return m, m.fetchPage("", false)
+	return m.triggerFetch("", false)
 }
 
 // startTail begins a new tail session: stops any previous one, clears the
@@ -400,6 +408,18 @@ func (m appModel) contentHeight() int {
 		return 0
 	}
 	return h
+}
+
+// triggerFetch marks a fetch as in flight (so both listModel's own
+// "loading…" empty-state text and the header's spinner reflect it) and
+// returns the batched fetch + spinner-tick Cmd. Every fetchPage call that
+// isn't the lazy near-bottom prefetch (which sets list.loading itself,
+// since it's list_model.Update that decides to trigger it) should go
+// through this rather than calling fetchPage directly, or there's no
+// visible sign a refresh/filter-submit/project-switch is even happening.
+func (m appModel) triggerFetch(pageToken string, appending bool) (appModel, tea.Cmd) {
+	m.list.loading = true
+	return m, tea.Batch(m.fetchPage(pageToken, appending), m.spinner.Tick)
 }
 
 // fetchPage returns a Cmd that lists one page of entries. appending

@@ -10,9 +10,14 @@ import (
 	"cloud.google.com/go/logging/apiv2/loggingpb"
 )
 
-// maxSummaryLen bounds how much of a payload's rendering shows up as the
-// one-line list-row summary.
-const maxSummaryLen = 200
+// maxSummaryLen bounds how much of a payload's rendering is kept for the
+// list row's Summary. It's a safety cap against a pathological single
+// entry (thousands of these are held in memory at once for a loaded page),
+// not a display width — the list view itself now offers wrap and
+// horizontal-scroll to read a long entry in full, so this needs to be
+// generous enough that hitting the cap is rare for real payloads, not
+// tuned to "one screen line".
+const maxSummaryLen = 4096
 
 // Severity is a Cloud Logging severity level (DEFAULT, DEBUG, INFO, ...).
 type Severity = logging.Severity

@@ -11,14 +11,35 @@ import (
 	"github.com/bricejulia/tailspin/internal/gcplog/gcplogtest"
 )
 
-// runCmd synchronously invokes a tea.Cmd, the way the Bubble Tea runtime
-// would (off a goroutine, but our Cmds don't depend on that). Returns nil
-// if cmd is nil, matching how appModel.Update treats "nothing to do".
-func runCmd(cmd tea.Cmd) tea.Msg {
+// findMsg synchronously invokes cmd and returns the first message of type T
+// it produces, recursing into tea.BatchMsg — Init and several handlers now
+// batch a fetch together with the spinner's Tick Cmd (see triggerFetch), so
+// the message under test is no longer always cmd()'s direct result.
+func findMsg[T any](cmd tea.Cmd) (T, bool) {
+	var zero T
 	if cmd == nil {
-		return nil
+		return zero, false
 	}
-	return cmd()
+	return findInMsg[T](cmd())
+}
+
+func findInMsg[T any](msg tea.Msg) (T, bool) {
+	var zero T
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, c := range batch {
+			if c == nil {
+				continue
+			}
+			if found, ok := findInMsg[T](c()); ok {
+				return found, true
+			}
+		}
+		return zero, false
+	}
+	if typed, ok := msg.(T); ok {
+		return typed, true
+	}
+	return zero, false
 }
 
 func textKey(s string) tea.KeyPressMsg {
@@ -36,11 +57,9 @@ func TestInitFetchesFirstPage(t *testing.T) {
 	}
 
 	m := New(fake, "test-project")
-	msg := runCmd(m.Init())
-
-	loaded, ok := msg.(entriesLoadedMsg)
+	loaded, ok := findMsg[entriesLoadedMsg](m.Init())
 	if !ok {
-		t.Fatalf("Init() cmd produced %T, want entriesLoadedMsg", msg)
+		t.Fatal("Init() cmd produced no entriesLoadedMsg")
 	}
 	if loaded.err != nil {
 		t.Fatalf("unexpected error: %v", loaded.err)
@@ -59,9 +78,12 @@ func TestInitFetchesFirstPage(t *testing.T) {
 func TestInitFetchError(t *testing.T) {
 	wantErr := gcplogtest.Client{ListErr: errFake}
 	m := New(&wantErr, "test-project")
-	msg := runCmd(m.Init())
+	loaded, ok := findMsg[entriesLoadedMsg](m.Init())
+	if !ok {
+		t.Fatal("Init() cmd produced no entriesLoadedMsg")
+	}
 
-	updated, _ := m.Update(msg)
+	updated, _ := m.Update(loaded)
 	m2 := updated.(appModel)
 	if m2.mode != modeError {
 		t.Fatalf("mode = %v, want modeError after a failed fetch", m2.mode)

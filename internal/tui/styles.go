@@ -39,18 +39,12 @@ var (
 	footerDescStyle = lipgloss.NewStyle().
 			Foreground(colorSubtle)
 
+	// selectedRowStyle is applied once, over the whole selected row's
+	// plain (unstyled) text — see entryPrefixPlain's doc comment for why
+	// it can't be layered on top of already-Render()'d, self-resetting
+	// column spans instead.
 	selectedRowStyle = lipgloss.NewStyle().
 				Background(colorSelectBg).
-				Bold(true)
-
-	// selectedMarkerStyle is the left-gutter ">" glyph marking the
-	// selected row — a second, color-independent cue on top of the
-	// background so the selection reads clearly even on themes/profiles
-	// where the background tint alone is subtle. Plain ASCII: an earlier
-	// attempt with "▎" (U+258E) rendered as the literal text "\u{258e}"
-	// under some terminfo/width-table combination instead of the glyph.
-	selectedMarkerStyle = lipgloss.NewStyle().
-				Foreground(colorAccent).
 				Bold(true)
 
 	spinnerStyle = lipgloss.NewStyle().
