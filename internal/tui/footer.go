@@ -18,7 +18,7 @@ func (m appModel) renderFooter() string {
 	case modeTail:
 		bindings = []key.Binding{pauseKey, keys.Up, keys.Down, keys.Back, keys.Quit}
 	default:
-		bindings = []key.Binding{keys.Up, keys.Down, keys.Enter, keys.Filter, keys.Command, keys.Tail, keys.Wrap, keys.Refresh, keys.Help, keys.Quit}
+		bindings = []key.Binding{keys.Up, keys.Down, pageNavKey, keys.Enter, keys.Filter, keys.Command, keys.Tail, keys.Wrap, keys.Refresh, keys.Help, keys.Quit}
 	}
 
 	var out strings.Builder

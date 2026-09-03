@@ -53,20 +53,22 @@ tailspin --version
 | Key | Action |
 |---|---|
 | `j` / `k`, `↓` / `↑` | Move selection |
-| `pgup` / `pgdn` | Page up / down |
+| `pgup` / `pgdn` | Scroll by a screenful |
+| `n` / `N` | Next / previous page — free within already-loaded pages, fetches more once you're on the last one |
 | `enter` | View full entry detail |
 | `esc` | Back |
 | `/` | Filter (severity, log name, free text, time range) |
 | `:` | Command mode (see below) |
 | `t` | Tail (live streaming) |
-| `w` | Toggle wrap: one-line-per-entry + `h`/`l` horizontal scroll, or full reflow with hanging indent |
+| `w` | Toggle h-scroll: normally the focused row auto-wraps to show its full message while every other row stays compact; h-scroll instead keeps every row one line, with `h`/`l` scrolling the table sideways |
 | `r` | Refresh (re-run the current query from page 1) |
 | `?` | Help |
 | `q` | Quit |
 
 **In the filter bar (`/`):** `tab` / `shift+tab` cycles between severity,
 log name, free text, and time-range fields; `←`/`→` (or `h`/`l`) cycles the
-severity and time-range fields; `enter` runs the query; `esc` cancels.
+severity and time-range fields; `enter` runs the query; `esc` cancels —
+from any field, text inputs included.
 
 **In tail mode (`t`):** `space` or `p` pauses/resumes autoscroll — new
 entries keep arriving and are kept while paused, so nothing is lost while

@@ -17,7 +17,7 @@ var (
 	colorError    = lipgloss.Color("203") // red — ERROR/CRITICAL
 	colorAlert    = lipgloss.Color("213") // magenta — ALERT/EMERGENCY
 	colorLive     = lipgloss.Color("46")  // green — the live-tail indicator
-	colorSelectBg = lipgloss.Color("236") // selected row background
+	colorSelectBg = lipgloss.Color("24")  // selected row background — a real, unmistakable highlight
 )
 
 var (
@@ -40,7 +40,19 @@ var (
 			Foreground(colorSubtle)
 
 	selectedRowStyle = lipgloss.NewStyle().
-				Background(colorSelectBg)
+				Background(colorSelectBg).
+				Bold(true)
+
+	// selectedMarkerStyle is the left-gutter "▎" glyph marking the
+	// selected row — a second, color-independent cue on top of the
+	// background so the selection reads clearly even on themes/profiles
+	// where the background tint alone is subtle.
+	selectedMarkerStyle = lipgloss.NewStyle().
+				Foreground(colorAccent).
+				Bold(true)
+
+	spinnerStyle = lipgloss.NewStyle().
+			Foreground(colorAccent)
 
 	errorStyle = lipgloss.NewStyle().
 			Bold(true).

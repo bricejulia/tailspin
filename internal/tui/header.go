@@ -7,6 +7,36 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
+// rightStatus renders the header's right-hand side: the tail LIVE/PAUSED
+// indicator in tail mode, or a loading spinner and page indicator in
+// browse mode, followed by the entry count either way.
+func (m appModel) rightStatus() string {
+	if m.mode == modeTail {
+		status := liveStyle.Render("● LIVE")
+		if m.tail.paused {
+			status = warningStyle.Render("‖ PAUSED")
+		}
+		return status + "  " + headerMetaStyle.Render(fmt.Sprintf("%d entries", len(m.tail.entries)))
+	}
+
+	loading := ""
+	if m.list.loading && len(m.list.entries) > 0 {
+		loading = m.spinner.View() + " " + statusStyle.Render("loading more…") + "  "
+	}
+
+	count := fmt.Sprintf("%d entries", len(m.list.entries))
+	if pages := m.list.pageCount(); pages > 1 {
+		if m.list.hasMore {
+			// pageCount is only "pages fetched so far" while more exist
+			// on the server — there's no fixed total to show yet.
+			count = fmt.Sprintf("%s · page %d/%d+", count, m.list.pageNumber(), pages)
+		} else {
+			count = fmt.Sprintf("%s · page %d/%d", count, m.list.pageNumber(), pages)
+		}
+	}
+	return loading + headerMetaStyle.Render(count)
+}
+
 // renderHeader draws tailspin's one-line k9s-style context bar: project,
 // active filter, entry count, and (once tail mode lands) a LIVE indicator.
 func (m appModel) renderHeader() string {
@@ -17,17 +47,7 @@ func (m appModel) renderHeader() string {
 		middle = errorStyle.Render(m.notice)
 	}
 
-	entryCount := len(m.list.entries)
-	live := ""
-	if m.mode == modeTail {
-		entryCount = len(m.tail.entries)
-		if m.tail.paused {
-			live = warningStyle.Render("‖ PAUSED") + "  "
-		} else {
-			live = liveStyle.Render("● LIVE") + "  "
-		}
-	}
-	right := live + headerMetaStyle.Render(fmt.Sprintf("%d entries", entryCount))
+	right := m.rightStatus()
 
 	bar := lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", middle)
 	return padBetween(bar, right, m.width)

@@ -10,6 +10,8 @@ type keyMap struct {
 	Down     key.Binding
 	PageUp   key.Binding
 	PageDown key.Binding
+	NextPage key.Binding
+	PrevPage key.Binding
 	Enter    key.Binding
 	Back     key.Binding
 	Filter   key.Binding
@@ -29,6 +31,11 @@ var (
 	shiftTabKey = key.NewBinding(key.WithKeys("shift+tab"))
 )
 
+// pageNavKey is a footer-only display binding combining NextPage/PrevPage
+// into one compact "n/N" hint — matching is still done against the two
+// separate bindings in keyMap.
+var pageNavKey = key.NewBinding(key.WithKeys("n", "N"), key.WithHelp("n/N", "next/prev page"))
+
 var keys = keyMap{
 	Up: key.NewBinding(
 		key.WithKeys("k", "up"),
@@ -45,6 +52,14 @@ var keys = keyMap{
 	PageDown: key.NewBinding(
 		key.WithKeys("pgdown", "ctrl+f"),
 		key.WithHelp("pgdn", "page down"),
+	),
+	NextPage: key.NewBinding(
+		key.WithKeys("n"),
+		key.WithHelp("n", "next page"),
+	),
+	PrevPage: key.NewBinding(
+		key.WithKeys("N"),
+		key.WithHelp("N", "prev page"),
 	),
 	Enter: key.NewBinding(
 		key.WithKeys("enter"),
@@ -68,7 +83,7 @@ var keys = keyMap{
 	),
 	Wrap: key.NewBinding(
 		key.WithKeys("w"),
-		key.WithHelp("w", "wrap"),
+		key.WithHelp("w", "h-scroll"),
 	),
 	Refresh: key.NewBinding(
 		key.WithKeys("r"),

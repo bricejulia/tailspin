@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/bricejulia/tailspin/internal/gcplog"
@@ -53,6 +54,7 @@ type appModel struct {
 	filterBar filterBarModel
 	command   commandModel
 	tail      tailModel
+	spinner   spinner.Model
 
 	// tailGen identifies the current tail session; tailStartedMsg/
 	// tailEventMsg carry the gen they belong to, so a message from a
@@ -83,6 +85,7 @@ func New(client gcplog.Client, project string) appModel {
 		filterBar: newFilterBarModel(),
 		command:   newCommandModel(),
 		tail:      newTailModel(),
+		spinner:   spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(spinnerStyle)),
 	}
 }
 
@@ -122,6 +125,14 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tailEventMsg:
 		return m.handleTailEvent(msg)
+
+	case spinner.TickMsg:
+		if !m.list.loading {
+			return m, nil // fetch already finished — let the animation stop
+		}
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
 	}
 
 	return m, nil
@@ -205,6 +216,18 @@ func (m appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, m.fetchPage("", false)
 		}
 		return m, nil
+	case key.Matches(msg, keys.NextPage):
+		if m.mode == modeBrowse {
+			if m.list.gotoNextPage() {
+				return m, tea.Batch(m.fetchPage(m.list.nextPageToken, true), m.spinner.Tick)
+			}
+		}
+		return m, nil
+	case key.Matches(msg, keys.PrevPage):
+		if m.mode == modeBrowse {
+			m.list.gotoPreviousPage()
+		}
+		return m, nil
 	}
 
 	switch m.mode {
@@ -214,7 +237,7 @@ func (m appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.list, cmd = m.list.Update(msg)
 		if !wasLoading && m.list.loading {
 			// list_model just flagged that it wants the next page.
-			cmd = tea.Batch(cmd, m.fetchPage(m.list.nextPageToken, true))
+			cmd = tea.Batch(cmd, m.fetchPage(m.list.nextPageToken, true), m.spinner.Tick)
 		}
 		return m, cmd
 	case modeDetail:

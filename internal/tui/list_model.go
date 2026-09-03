@@ -16,9 +16,14 @@ import (
 // selection must get before the next page is lazily fetched.
 const prefetchThreshold = 5
 
+// gutterWidth is the left column reserved for the selection marker ("▎ ")
+// on the focused row, and matching blank space on every other row so
+// columns stay aligned.
+const gutterWidth = 2
+
 // listModel renders the scrollable, k9s-dense table of log entries and
 // tracks which row is selected. It owns no GCP client — appModel triggers
-// fetches and feeds results in via setEntries/appendEntries.
+// fetches and feeds results in via reset/appendPage.
 type listModel struct {
 	viewport viewport.Model
 	entries  []gcplog.Entry
@@ -28,18 +33,32 @@ type listModel struct {
 	hasMore       bool
 	loading       bool
 
-	// wrap controls how rows wider than the terminal are handled:
-	// false (the default, k9s-style) keeps one entry = one screen line
-	// and lets h/l (or ←/→) scroll the table horizontally to read the
-	// rest. true reflows each entry's message across as many lines as
-	// it needs, with continuation lines aligned under the message
-	// column. Toggled with 'w'.
-	wrap bool
+	// hscroll controls how rows wider than the terminal are handled:
+	// false (the default) auto-wraps the focused row across as many
+	// lines as its message needs, with continuation lines aligned under
+	// the message column, while every other row stays a compact single
+	// line — moving the selection is enough to read a long entry, no
+	// extra keypress needed. true (toggled with 'w') instead keeps every
+	// row single-line, uniformly, and lets h/l scroll the whole table
+	// horizontally — for reading wide content without the list's height
+	// jumping around as you navigate.
+	hscroll bool
+
+	// pageStarts[i] is the entries index where the i-th fetched page
+	// begins; len(pageStarts) is how many pages are currently loaded.
+	// Pages already fetched are never discarded, so "previous page" is
+	// always a free jump within what's already in entries — only
+	// crossing past the last loaded page needs a new fetch.
+	pageStarts []int
+	// pendingPageJump is set when a fetch was kicked off by an explicit
+	// next-page request, so once it lands the selection jumps to the
+	// start of the newly-loaded page instead of staying put (the
+	// implicit near-bottom prefetch, by contrast, never moves selection).
+	pendingPageJump bool
 
 	// groupStart[i] is the physical viewport line where entries[i]
-	// begins; groupStart[len(entries)] is the total line count. In
-	// non-wrap mode this is just the identity (one line per entry); in
-	// wrap mode an entry can span several lines.
+	// begins; groupStart[len(entries)] is the total line count. Only the
+	// selected row can span more than one line (see hscroll above).
 	groupStart []int
 
 	width, height int
@@ -61,22 +80,33 @@ func (m *listModel) SetSize(width, height int) {
 // reset replaces the entry set (a fresh query) and scrolls to the top.
 func (m *listModel) reset(page gcplog.Page) {
 	m.entries = page.Entries
+	m.pageStarts = []int{0}
 	m.nextPageToken = page.NextPageToken
 	m.hasMore = page.NextPageToken != ""
 	m.selected = 0
 	m.loading = false
+	m.pendingPageJump = false
 	m.viewport.SetXOffset(0)
 	m.render()
 	m.viewport.SetYOffset(0)
 }
 
-// appendPage extends the entry set with another fetched page.
+// appendPage extends the entry set with another fetched page. If the fetch
+// was triggered by gotoNextPage, selection jumps to the new page's start;
+// otherwise (the implicit near-bottom prefetch) selection is left alone.
 func (m *listModel) appendPage(page gcplog.Page) {
+	newPageStart := len(m.entries)
 	m.entries = append(m.entries, page.Entries...)
+	m.pageStarts = append(m.pageStarts, newPageStart)
 	m.nextPageToken = page.NextPageToken
 	m.hasMore = page.NextPageToken != ""
 	m.loading = false
+	if m.pendingPageJump {
+		m.selected = newPageStart
+		m.pendingPageJump = false
+	}
 	m.render()
+	m.scrollIntoView()
 }
 
 func (m listModel) selectedEntry() (gcplog.Entry, bool) {
@@ -84,6 +114,58 @@ func (m listModel) selectedEntry() (gcplog.Entry, bool) {
 		return gcplog.Entry{}, false
 	}
 	return m.entries[m.selected], true
+}
+
+// currentPageIndex returns which loaded page (an index into pageStarts)
+// the current selection falls in.
+func (m listModel) currentPageIndex() int {
+	idx := 0
+	for i, start := range m.pageStarts {
+		if start <= m.selected {
+			idx = i
+		}
+	}
+	return idx
+}
+
+// pageNumber and pageCount describe pagination state for display: 1-based
+// current page, and how many pages are loaded so far (this only ever
+// grows — nothing is evicted — so it's "pages seen", not "total pages").
+func (m listModel) pageNumber() int { return m.currentPageIndex() + 1 }
+func (m listModel) pageCount() int  { return len(m.pageStarts) }
+
+// gotoNextPage jumps to the start of the next page. If that page is
+// already loaded, it jumps immediately and returns false (no fetch
+// needed). Otherwise, if more pages exist on the server, it flags the
+// jump as pending and returns true — the caller should issue a fetch, and
+// appendPage will complete the jump once the page arrives.
+func (m *listModel) gotoNextPage() bool {
+	idx := m.currentPageIndex()
+	if idx+1 < len(m.pageStarts) {
+		m.selected = m.pageStarts[idx+1]
+		m.render()
+		m.scrollIntoView()
+		return false
+	}
+	if m.hasMore && !m.loading {
+		m.loading = true
+		m.pendingPageJump = true
+		return true
+	}
+	return false
+}
+
+// gotoPreviousPage jumps to the start of the previous page. Always free —
+// every page ever fetched is still in entries.
+func (m *listModel) gotoPreviousPage() {
+	idx := m.currentPageIndex()
+	if idx == 0 {
+		m.selected = 0
+	} else {
+		m.selected = m.pageStarts[idx-1]
+	}
+	m.render()
+	m.scrollIntoView()
 }
 
 // Update handles browse-mode navigation. It returns a Cmd to prefetch the
@@ -100,13 +182,13 @@ func (m listModel) Update(msg tea.Msg) (listModel, tea.Cmd) {
 		case key.Matches(keyMsg, keys.PageUp):
 			m.moveSelection(-m.height)
 		case key.Matches(keyMsg, keys.Wrap):
-			m.wrap = !m.wrap
+			m.hscroll = !m.hscroll
 			m.viewport.SetXOffset(0)
 			m.render()
 			m.scrollIntoView()
-		case !m.wrap && (keyMsg.String() == "left" || keyMsg.String() == "h"):
+		case m.hscroll && (keyMsg.String() == "left" || keyMsg.String() == "h"):
 			m.viewport.ScrollLeft(4)
-		case !m.wrap && (keyMsg.String() == "right" || keyMsg.String() == "l"):
+		case m.hscroll && (keyMsg.String() == "right" || keyMsg.String() == "l"):
 			m.viewport.ScrollRight(4)
 		}
 	}
@@ -195,14 +277,34 @@ func entryPrefix(e gcplog.Entry) string {
 	)
 }
 
-// renderRow renders entry i as one or more physical lines, depending on
-// wrap mode.
+// gutter renders the 2-column left margin: a colored marker on the
+// selected row, blank space otherwise, so the selection is visible even
+// where the background tint alone is subtle.
+func gutter(selected bool) string {
+	if selected {
+		return selectedMarkerStyle.Render(">") + " "
+	}
+	return strings.Repeat(" ", gutterWidth)
+}
+
+// renderRow renders entry i as one or more physical lines. Only the
+// selected row (i == m.selected) can span more than one line — see the
+// hscroll field doc for the two display modes.
 func (m listModel) renderRow(i int, e gcplog.Entry) []string {
-	prefix := entryPrefix(e)
+	selected := i == m.selected
+	prefix := gutter(selected) + entryPrefix(e)
 	prefixWidth := lipgloss.Width(prefix)
 
 	var rowLines []string
-	if m.wrap {
+	switch {
+	case m.hscroll:
+		// Uniform single-line rows; h/l scrolls the viewport
+		// horizontally to read whatever doesn't fit.
+		rowLines = []string{prefix + e.Summary}
+	case selected:
+		// The focused entry always shows its full message — reflowed
+		// across as many lines as it needs, continuation lines
+		// aligned under the message column.
 		avail := max(m.width-prefixWidth, 10)
 		indent := strings.Repeat(" ", prefixWidth)
 		for j, seg := range strings.Split(lipgloss.Wrap(e.Summary, avail, ""), "\n") {
@@ -212,14 +314,13 @@ func (m listModel) renderRow(i int, e gcplog.Entry) []string {
 				rowLines = append(rowLines, indent+seg)
 			}
 		}
-	} else {
-		// One entry = one screen line, full width. 'w' is off — h/l
-		// horizontally scrolls the viewport to read the rest rather
-		// than truncating it away.
-		rowLines = []string{prefix + e.Summary}
+	default:
+		// Unselected rows stay compact: one line, clipped to fit.
+		avail := max(m.width-prefixWidth, 1)
+		rowLines = []string{prefix + truncate(e.Summary, avail)}
 	}
 
-	if i == m.selected {
+	if selected {
 		for j, line := range rowLines {
 			rowLines[j] = selectedRowStyle.Render(padToWidth(line, m.width))
 		}
