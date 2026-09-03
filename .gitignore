@@ -1,0 +1,5 @@
+/tailspin
+/bin/
+.DS_Store
+*.test
+*.out
