@@ -28,11 +28,19 @@ type listModel struct {
 	hasMore       bool
 	loading       bool
 
-	// truncate controls how rows wider than the terminal are handled:
-	// true (the default, k9s-style) clips each row to one screen line
-	// with an ellipsis; false shows full rows and lets h/l (or ←/→)
-	// scroll the table horizontally instead. Toggled with 'w'.
-	truncate bool
+	// wrap controls how rows wider than the terminal are handled:
+	// false (the default, k9s-style) keeps one entry = one screen line
+	// and lets h/l (or ←/→) scroll the table horizontally to read the
+	// rest. true reflows each entry's message across as many lines as
+	// it needs, with continuation lines aligned under the message
+	// column. Toggled with 'w'.
+	wrap bool
+
+	// groupStart[i] is the physical viewport line where entries[i]
+	// begins; groupStart[len(entries)] is the total line count. In
+	// non-wrap mode this is just the identity (one line per entry); in
+	// wrap mode an entry can span several lines.
+	groupStart []int
 
 	width, height int
 }
@@ -40,7 +48,6 @@ type listModel struct {
 func newListModel() listModel {
 	return listModel{
 		viewport: viewport.New(),
-		truncate: true,
 	}
 }
 
@@ -58,8 +65,9 @@ func (m *listModel) reset(page gcplog.Page) {
 	m.hasMore = page.NextPageToken != ""
 	m.selected = 0
 	m.loading = false
-	m.viewport.GotoTop()
+	m.viewport.SetXOffset(0)
 	m.render()
+	m.viewport.SetYOffset(0)
 }
 
 // appendPage extends the entry set with another fetched page.
@@ -93,14 +101,13 @@ func (m listModel) Update(msg tea.Msg) (listModel, tea.Cmd) {
 		case key.Matches(msg, keys.PageUp):
 			m.moveSelection(-m.height)
 		case key.Matches(msg, keys.Wrap):
-			m.truncate = !m.truncate
-			if m.truncate {
-				m.viewport.ScrollLeft(1 << 30) // back to the left edge
-			}
+			m.wrap = !m.wrap
+			m.viewport.SetXOffset(0)
 			m.render()
-		case !m.truncate && (msg.String() == "left" || msg.String() == "h"):
+			m.scrollIntoView()
+		case !m.wrap && (msg.String() == "left" || msg.String() == "h"):
 			m.viewport.ScrollLeft(4)
-		case !m.truncate && (msg.String() == "right" || msg.String() == "l"):
+		case !m.wrap && (msg.String() == "right" || msg.String() == "l"):
 			m.viewport.ScrollRight(4)
 		}
 	}
@@ -123,8 +130,28 @@ func (m *listModel) moveSelection(delta int) {
 	if m.selected >= len(m.entries) {
 		m.selected = len(m.entries) - 1
 	}
-	m.viewport.EnsureVisible(m.selected, 0, 0)
 	m.render()
+	m.scrollIntoView()
+}
+
+// scrollIntoView scrolls the viewport by the minimum amount needed to bring
+// the selected entry's full line range into view, nudging one row at a
+// time when moving off either edge (rather than viewport.EnsureVisible's
+// behavior of re-anchoring the target line to the top on every call, which
+// both resets horizontal scroll on every vertical move and, when moving
+// down past the bottom edge, jumps a full page instead of one line).
+func (m *listModel) scrollIntoView() {
+	if len(m.groupStart) <= m.selected+1 {
+		return
+	}
+	top, bottom := m.groupStart[m.selected], m.groupStart[m.selected+1]-1
+
+	switch {
+	case top < m.viewport.YOffset():
+		m.viewport.SetYOffset(top)
+	case bottom >= m.viewport.YOffset()+m.height:
+		m.viewport.SetYOffset(bottom - m.height + 1)
+	}
 }
 
 // wantsPrefetch reports whether the selection is close enough to the loaded
@@ -134,40 +161,75 @@ func (m listModel) wantsPrefetch() bool {
 }
 
 func (m *listModel) render() {
+	m.groupStart = make([]int, len(m.entries)+1)
 	if len(m.entries) == 0 {
 		m.viewport.SetContent("")
 		return
 	}
-	lines := make([]string, len(m.entries))
+
+	var lines []string
 	for i, e := range m.entries {
-		lines[i] = m.renderRow(i, e)
+		m.groupStart[i] = len(lines)
+		lines = append(lines, m.renderRow(i, e)...)
 	}
+	m.groupStart[len(m.entries)] = len(lines)
 	m.viewport.SetContentLines(lines)
 }
 
-func (m listModel) renderRow(i int, e gcplog.Entry) string {
+// severityColWidth fits the longest severity name ("EMERGENCY").
+const severityColWidth = 9
+
+// renderRow renders entry i as one or more physical lines, depending on
+// wrap mode.
+//
+// It never applies lipgloss's Style.Width to a string that might already be
+// at or over that width: Width(n) doesn't just pad short content, it wraps
+// (reflows) anything longer than n — exactly the multi-line-row bug this
+// was built to avoid. Columns are padded manually with padToWidth instead,
+// and styles are applied with plain Render (no Width) throughout.
+func (m listModel) renderRow(i int, e gcplog.Entry) []string {
 	sevStyle := severityStyle(e.Severity)
 	prefix := fmt.Sprintf("%s  %s  %s  ",
 		e.Timestamp.Local().Format("15:04:05"),
-		sevStyle.Width(8).Render(strings.ToUpper(e.Severity.String())),
-		lipgloss.NewStyle().Foreground(colorMuted).Width(28).Render(truncate(shortLogName(e.LogName), 28)),
+		sevStyle.Render(padToWidth(strings.ToUpper(e.Severity.String()), severityColWidth)),
+		lipgloss.NewStyle().Foreground(colorMuted).Render(padToWidth(truncate(shortLogName(e.LogName), 28), 28)),
 	)
+	prefixWidth := lipgloss.Width(prefix)
 
-	summary := e.Summary
-	if m.truncate {
-		// k9s-style: a row is always exactly one screen line. Clip
-		// rather than let the terminal wrap it — 'w' switches to
-		// full-width rows with horizontal scrolling instead.
-		if avail := m.width - lipgloss.Width(prefix); avail > 0 {
-			summary = truncate(summary, avail)
+	var rowLines []string
+	if m.wrap {
+		avail := max(m.width-prefixWidth, 10)
+		indent := strings.Repeat(" ", prefixWidth)
+		for j, seg := range strings.Split(lipgloss.Wrap(e.Summary, avail, ""), "\n") {
+			if j == 0 {
+				rowLines = append(rowLines, prefix+seg)
+			} else {
+				rowLines = append(rowLines, indent+seg)
+			}
+		}
+	} else {
+		// One entry = one screen line, full width. 'w' is off — h/l
+		// horizontally scrolls the viewport to read the rest rather
+		// than truncating it away.
+		rowLines = []string{prefix + e.Summary}
+	}
+
+	if i == m.selected {
+		for j, line := range rowLines {
+			rowLines[j] = selectedRowStyle.Render(padToWidth(line, m.width))
 		}
 	}
+	return rowLines
+}
 
-	row := prefix + summary
-	if i == m.selected {
-		return selectedRowStyle.Width(m.width).Render(row)
+// padToWidth right-pads s with spaces to width display columns. Content
+// already at or beyond width is returned unchanged (never truncated —
+// callers that need clipping do that separately).
+func padToWidth(s string, width int) string {
+	if w := lipgloss.Width(s); w < width {
+		return s + strings.Repeat(" ", width-w)
 	}
-	return row
+	return s
 }
 
 func (m listModel) View() string {
