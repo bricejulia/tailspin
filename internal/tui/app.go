@@ -49,6 +49,7 @@ type appModel struct {
 	filter  gcplog.FilterState
 
 	list      listModel
+	detail    detailModel
 	filterBar filterBarModel
 	command   commandModel
 
@@ -69,6 +70,7 @@ func New(client gcplog.Client, project string) appModel {
 		// break the page token (see FilterState.Since).
 		filter:    gcplog.FilterState{Since: time.Now().Add(-defaultLookback)},
 		list:      newListModel(),
+		detail:    newDetailModel(),
 		filterBar: newFilterBarModel(),
 		command:   newCommandModel(),
 	}
@@ -83,6 +85,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.list.SetSize(m.width, m.contentHeight())
+		m.detail.SetSize(m.width, m.contentHeight())
 		return m, nil
 
 	case tea.KeyPressMsg:
@@ -166,9 +169,18 @@ func (m appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.mode = modeBrowse
 		}
 		return m, nil
+	case key.Matches(msg, keys.Enter):
+		if m.mode == modeBrowse {
+			if entry, ok := m.list.selectedEntry(); ok {
+				m.detail.show(entry)
+				m.mode = modeDetail
+			}
+		}
+		return m, nil
 	}
 
-	if m.mode == modeBrowse {
+	switch m.mode {
+	case modeBrowse:
 		var cmd tea.Cmd
 		wasLoading := m.list.loading
 		m.list, cmd = m.list.Update(msg)
@@ -176,6 +188,10 @@ func (m appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// list_model just flagged that it wants the next page.
 			cmd = tea.Batch(cmd, m.fetchPage(m.list.nextPageToken, true))
 		}
+		return m, cmd
+	case modeDetail:
+		var cmd tea.Cmd
+		m.detail, cmd = m.detail.Update(msg)
 		return m, cmd
 	}
 	return m, nil
@@ -277,6 +293,8 @@ func (m appModel) View() tea.View {
 		body = m.list.View()
 	case modeCommand:
 		body = m.list.View()
+	case modeDetail:
+		body = m.detail.View()
 	case modeTail:
 		body = statusStyle.Render("tail mode — live streaming lands in M5. esc to go back.")
 	default:

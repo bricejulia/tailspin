@@ -48,6 +48,10 @@ var (
 
 	statusStyle = lipgloss.NewStyle().
 			Foreground(colorMuted)
+
+	detailLabelStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(colorAccent)
 )
 
 // severityStyle returns the k9s-style status color for a log severity.
