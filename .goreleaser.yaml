@@ -1,0 +1,43 @@
+version: 2
+
+builds:
+  - main: ./cmd/tailspin
+    binary: tailspin
+    ldflags:
+      - -s -w -X github.com/bricejulia/tailspin/internal/version.Version={{.Version}}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+#      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+
+homebrew_casks:
+  - name: tailspin
+    skip_upload: auto
+    repository:
+      owner: bricejulia
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TOKEN }}"
+    homepage: "https://github.com/bricejulia/tailspin"
+    description: "Browse, filter, and live-tail gcp log entries for a project without leaving the terminal — no `gcloud logging read` incantations, no Cloud Console tab."
+    directory: Casks
