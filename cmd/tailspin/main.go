@@ -45,7 +45,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	model := tui.New(client, project)
 	if _, err := tea.NewProgram(model).Run(); err != nil {

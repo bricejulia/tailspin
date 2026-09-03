@@ -102,6 +102,8 @@ func (m *filterBarModel) focusField() tea.Cmd {
 		return m.logName.Focus()
 	case fieldFreeText:
 		return m.freeText.Focus()
+	default:
+		// fieldSeverity, fieldSince: enum fields, nothing to focus.
 	}
 	return nil
 }
@@ -144,6 +146,8 @@ func (m filterBarModel) Update(msg tea.Msg) (filterBarModel, tea.Cmd) {
 				m.sinceIdx = (m.sinceIdx + 1) % len(sinceOptions)
 				return m, nil
 			}
+		default:
+			// fieldLogName, fieldFreeText: text input, handled below.
 		}
 	}
 
@@ -153,6 +157,8 @@ func (m filterBarModel) Update(msg tea.Msg) (filterBarModel, tea.Cmd) {
 		m.logName, cmd = m.logName.Update(msg)
 	case fieldFreeText:
 		m.freeText, cmd = m.freeText.Update(msg)
+	default:
+		// fieldSeverity, fieldSince: enum fields, no text input to update.
 	}
 	return m, cmd
 }

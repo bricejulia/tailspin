@@ -89,25 +89,24 @@ func (m listModel) selectedEntry() (gcplog.Entry, bool) {
 // Update handles browse-mode navigation. It returns a Cmd to prefetch the
 // next page when the selection nears the end of what's loaded.
 func (m listModel) Update(msg tea.Msg) (listModel, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyPressMsg:
+	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
 		switch {
-		case key.Matches(msg, keys.Down):
+		case key.Matches(keyMsg, keys.Down):
 			m.moveSelection(1)
-		case key.Matches(msg, keys.Up):
+		case key.Matches(keyMsg, keys.Up):
 			m.moveSelection(-1)
-		case key.Matches(msg, keys.PageDown):
+		case key.Matches(keyMsg, keys.PageDown):
 			m.moveSelection(m.height)
-		case key.Matches(msg, keys.PageUp):
+		case key.Matches(keyMsg, keys.PageUp):
 			m.moveSelection(-m.height)
-		case key.Matches(msg, keys.Wrap):
+		case key.Matches(keyMsg, keys.Wrap):
 			m.wrap = !m.wrap
 			m.viewport.SetXOffset(0)
 			m.render()
 			m.scrollIntoView()
-		case !m.wrap && (msg.String() == "left" || msg.String() == "h"):
+		case !m.wrap && (keyMsg.String() == "left" || keyMsg.String() == "h"):
 			m.viewport.ScrollLeft(4)
-		case !m.wrap && (msg.String() == "right" || msg.String() == "l"):
+		case !m.wrap && (keyMsg.String() == "right" || keyMsg.String() == "l"):
 			m.viewport.ScrollRight(4)
 		}
 	}

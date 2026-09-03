@@ -62,7 +62,7 @@ type appModel struct {
 	tailCancel func()
 	tailEvents <-chan gcplog.TailEvent
 
-	err    error // fatal: takes over the whole screen (modeError)
+	err    error  // fatal: takes over the whole screen (modeError)
 	notice string // transient: shown in the header, doesn't change mode
 
 	width, height int
@@ -155,6 +155,9 @@ func (m appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.mode = modeBrowse
 		}
 		return m, nil
+
+	default:
+		// modeBrowse, modeDetail, modeTail, modeError: handled below.
 	}
 
 	// modeBrowse, modeTail, modeDetail, modeError: global keys first,
@@ -162,9 +165,6 @@ func (m appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
-	}
-	if m.mode == modeError {
-		return m, nil
 	}
 
 	switch {
@@ -185,8 +185,9 @@ func (m appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.mode == modeTail {
 			m = m.stopTail()
 		}
-		if m.mode == modeTail || m.mode == modeDetail {
+		if m.mode == modeTail || m.mode == modeDetail || m.mode == modeError {
 			m.mode = modeBrowse
+			m.err = nil
 		}
 		return m, nil
 	case key.Matches(msg, keys.Enter):
@@ -198,7 +199,9 @@ func (m appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case key.Matches(msg, keys.Refresh):
-		if m.mode == modeBrowse {
+		if m.mode == modeBrowse || m.mode == modeError {
+			m.mode = modeBrowse
+			m.err = nil
 			return m, m.fetchPage("", false)
 		}
 		return m, nil
@@ -221,6 +224,11 @@ func (m appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case modeTail:
 		m.tail = m.tail.Update(msg)
 		return m, nil
+	default:
+		// modeFilterFocus, modeCommand, modeHelp, modeError: no further
+		// per-key handling here (the first two return earlier in this
+		// function; help and error modes have nothing more to do with an
+		// unmatched key).
 	}
 	return m, nil
 }
@@ -259,6 +267,9 @@ func (m appModel) handleCommand(cmd parsedCommand) (tea.Model, tea.Cmd) {
 		m.mode = modeBrowse
 		m.notice = "switching to project " + cmd.Arg + "…"
 		return m, m.switchProjectCmd(cmd.Arg)
+	default:
+		// cmdUnknown never reaches here: command_model only emits
+		// commandSubmittedMsg for a successfully-parsed command.
 	}
 	return m, nil
 }
@@ -392,7 +403,7 @@ func (m appModel) View() tea.View {
 	var body string
 	switch m.mode {
 	case modeError:
-		body = errorStyle.Render("error: " + m.err.Error())
+		body = errorStyle.Render("error: " + friendlyError(m.err))
 	case modeHelp:
 		body = helpText()
 	case modeFilterFocus:

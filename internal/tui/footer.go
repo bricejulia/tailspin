@@ -12,7 +12,7 @@ func (m appModel) renderFooter() string {
 	var bindings []key.Binding
 	switch m.mode {
 	case modeError:
-		bindings = []key.Binding{keys.Quit}
+		bindings = []key.Binding{keys.Refresh, keys.Command, keys.Back, keys.Quit}
 	case modeDetail:
 		bindings = []key.Binding{keys.Up, keys.Down, keys.PageUp, keys.PageDown, keys.Back, keys.Quit}
 	case modeTail:

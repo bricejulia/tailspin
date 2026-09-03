@@ -32,18 +32,14 @@ func (m *commandModel) focus() tea.Cmd {
 }
 
 func (m commandModel) Update(msg tea.Msg) (commandModel, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyPressMsg:
-		switch msg.String() {
-		case "enter":
-			parsed, err := parseCommand(m.input.Value())
-			if err != nil {
-				m.err = err
-				return m, nil
-			}
-			m.err = nil
-			return m, func() tea.Msg { return commandSubmittedMsg{cmd: parsed} }
+	if keyMsg, ok := msg.(tea.KeyPressMsg); ok && keyMsg.String() == "enter" {
+		parsed, err := parseCommand(m.input.Value())
+		if err != nil {
+			m.err = err
+			return m, nil
 		}
+		m.err = nil
+		return m, func() tea.Msg { return commandSubmittedMsg{cmd: parsed} }
 	}
 
 	var cmd tea.Cmd

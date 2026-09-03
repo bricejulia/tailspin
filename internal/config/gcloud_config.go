@@ -43,7 +43,7 @@ func gcloudDefaultProject() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("reading gcloud config %s: %w", configPath, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	inCore := true
 	scanner := bufio.NewScanner(f)
