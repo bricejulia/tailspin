@@ -28,12 +28,19 @@ type listModel struct {
 	hasMore       bool
 	loading       bool
 
+	// truncate controls how rows wider than the terminal are handled:
+	// true (the default, k9s-style) clips each row to one screen line
+	// with an ellipsis; false shows full rows and lets h/l (or ←/→)
+	// scroll the table horizontally instead. Toggled with 'w'.
+	truncate bool
+
 	width, height int
 }
 
 func newListModel() listModel {
 	return listModel{
 		viewport: viewport.New(),
+		truncate: true,
 	}
 }
 
@@ -85,6 +92,16 @@ func (m listModel) Update(msg tea.Msg) (listModel, tea.Cmd) {
 			m.moveSelection(m.height)
 		case key.Matches(msg, keys.PageUp):
 			m.moveSelection(-m.height)
+		case key.Matches(msg, keys.Wrap):
+			m.truncate = !m.truncate
+			if m.truncate {
+				m.viewport.ScrollLeft(1 << 30) // back to the left edge
+			}
+			m.render()
+		case !m.truncate && (msg.String() == "left" || msg.String() == "h"):
+			m.viewport.ScrollLeft(4)
+		case !m.truncate && (msg.String() == "right" || msg.String() == "l"):
+			m.viewport.ScrollRight(4)
 		}
 	}
 
@@ -130,12 +147,23 @@ func (m *listModel) render() {
 
 func (m listModel) renderRow(i int, e gcplog.Entry) string {
 	sevStyle := severityStyle(e.Severity)
-	row := fmt.Sprintf("%s  %s  %s  %s",
+	prefix := fmt.Sprintf("%s  %s  %s  ",
 		e.Timestamp.Local().Format("15:04:05"),
 		sevStyle.Width(8).Render(strings.ToUpper(e.Severity.String())),
 		lipgloss.NewStyle().Foreground(colorMuted).Width(28).Render(truncate(shortLogName(e.LogName), 28)),
-		e.Summary,
 	)
+
+	summary := e.Summary
+	if m.truncate {
+		// k9s-style: a row is always exactly one screen line. Clip
+		// rather than let the terminal wrap it — 'w' switches to
+		// full-width rows with horizontal scrolling instead.
+		if avail := m.width - lipgloss.Width(prefix); avail > 0 {
+			summary = truncate(summary, avail)
+		}
+	}
+
+	row := prefix + summary
 	if i == m.selected {
 		return selectedRowStyle.Width(m.width).Render(row)
 	}

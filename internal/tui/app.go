@@ -8,13 +8,15 @@ import (
 	"context"
 	"time"
 
+	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/bricejulia/tailspin/internal/gcplog"
 )
 
-// mode selects which part of the UI is active. Only modeBrowse is fully
-// wired up in this milestone; the rest land in later milestones.
+// mode selects which part of the UI is active. modeDetail and modeTail are
+// wired up as mode transitions here (M3) but modeTail's actual live
+// streaming lands in M5; modeDetail lands in M4.
 type mode int
 
 const (
@@ -23,13 +25,14 @@ const (
 	modeFilterFocus
 	modeCommand
 	modeTail
+	modeHelp
 	modeError
 )
 
 const pageSize = 50
 
-// fetchTimeout bounds a single ListEntries call so a stalled network
-// request can't hang the UI forever.
+// fetchTimeout bounds a single ListEntries/NewClient call so a stalled
+// network request can't hang the UI forever.
 const fetchTimeout = 15 * time.Second
 
 // defaultLookback is how far back browse mode looks by default, matching
@@ -45,9 +48,12 @@ type appModel struct {
 	project string
 	filter  gcplog.FilterState
 
-	list listModel
+	list      listModel
+	filterBar filterBarModel
+	command   commandModel
 
-	err error
+	err    error // fatal: takes over the whole screen (modeError)
+	notice string // transient: shown in the header, doesn't change mode
 
 	width, height int
 }
@@ -61,8 +67,10 @@ func New(client gcplog.Client, project string) appModel {
 		// per-request from time.Now(), which would make the filter
 		// string drift between pages of the same paginated query and
 		// break the page token (see FilterState.Since).
-		filter: gcplog.FilterState{Since: time.Now().Add(-defaultLookback)},
-		list:   newListModel(),
+		filter:    gcplog.FilterState{Since: time.Now().Add(-defaultLookback)},
+		list:      newListModel(),
+		filterBar: newFilterBarModel(),
+		command:   newCommandModel(),
 	}
 }
 
@@ -78,16 +86,89 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
-		if cmd, handled := m.handleGlobalKey(msg); handled {
-			return m, cmd
-		}
+		return m.handleKey(msg)
 
 	case entriesLoadedMsg:
 		return m.handleEntriesLoaded(msg)
+
+	case filterSubmittedMsg:
+		m.filter = msg.filter
+		m.notice = ""
+		m.mode = modeBrowse
+		return m, m.fetchPage("", false)
+
+	case commandSubmittedMsg:
+		return m.handleCommand(msg.cmd)
+
+	case projectSwitchedMsg:
+		return m.handleProjectSwitched(msg)
 	}
 
+	return m, nil
+}
+
+// handleKey routes a key press either to the focused sub-model (in an
+// input-capturing mode) or to global/browse handling.
+func (m appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch m.mode {
-	case modeBrowse:
+	case modeFilterFocus:
+		if msg.String() == "esc" {
+			m.mode = modeBrowse
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.filterBar, cmd = m.filterBar.Update(msg)
+		return m, cmd
+
+	case modeCommand:
+		if msg.String() == "esc" {
+			m.mode = modeBrowse
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.command, cmd = m.command.Update(msg)
+		return m, cmd
+
+	case modeHelp:
+		switch msg.String() {
+		case "esc", "q", "?":
+			m.mode = modeBrowse
+		}
+		return m, nil
+	}
+
+	// modeBrowse, modeTail, modeDetail, modeError: global keys first,
+	// then mode-specific handling.
+	switch msg.String() {
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	}
+	if m.mode == modeError {
+		return m, nil
+	}
+
+	switch {
+	case key.Matches(msg, keys.Filter):
+		m.filterBar.seed(m.filter)
+		m.mode = modeFilterFocus
+		return m, m.filterBar.focusField()
+	case key.Matches(msg, keys.Command):
+		m.mode = modeCommand
+		return m, m.command.focus()
+	case key.Matches(msg, keys.Help):
+		m.mode = modeHelp
+		return m, nil
+	case key.Matches(msg, keys.Tail):
+		m.mode = modeTail
+		return m, nil
+	case key.Matches(msg, keys.Back):
+		if m.mode == modeTail || m.mode == modeDetail {
+			m.mode = modeBrowse
+		}
+		return m, nil
+	}
+
+	if m.mode == modeBrowse {
 		var cmd tea.Cmd
 		wasLoading := m.list.loading
 		m.list, cmd = m.list.Update(msg)
@@ -97,19 +178,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, cmd
 	}
-
 	return m, nil
-}
-
-// handleGlobalKey handles keys that apply regardless of mode (quit, and —
-// once modeError is entered — nothing else). Mode-specific keys are handled
-// by the sub-model's own Update.
-func (m appModel) handleGlobalKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
-	switch msg.String() {
-	case "q", "ctrl+c":
-		return tea.Quit, true
-	}
-	return nil, false
 }
 
 func (m appModel) handleEntriesLoaded(msg entriesLoadedMsg) (tea.Model, tea.Cmd) {
@@ -124,6 +193,43 @@ func (m appModel) handleEntriesLoaded(msg entriesLoadedMsg) (tea.Model, tea.Cmd)
 		m.list.reset(msg.page)
 	}
 	return m, nil
+}
+
+func (m appModel) handleCommand(cmd parsedCommand) (tea.Model, tea.Cmd) {
+	switch cmd.Kind {
+	case cmdBrowse:
+		m.mode = modeBrowse
+		return m, nil
+	case cmdTail:
+		m.mode = modeTail
+		return m, nil
+	case cmdHelp:
+		m.mode = modeHelp
+		return m, nil
+	case cmdQuit:
+		return m, tea.Quit
+	case cmdProject:
+		m.mode = modeBrowse
+		m.notice = "switching to project " + cmd.Arg + "…"
+		return m, m.switchProjectCmd(cmd.Arg)
+	}
+	return m, nil
+}
+
+func (m appModel) handleProjectSwitched(msg projectSwitchedMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.notice = "project switch failed: " + msg.err.Error()
+		return m, nil
+	}
+	if m.client != nil {
+		_ = m.client.Close()
+	}
+	m.client = msg.client
+	m.project = msg.project
+	m.filter = gcplog.FilterState{Since: time.Now().Add(-defaultLookback)}
+	m.notice = ""
+	m.mode = modeBrowse
+	return m, m.fetchPage("", false)
 }
 
 // contentHeight is the terminal height available to the list/detail view,
@@ -149,15 +255,45 @@ func (m appModel) fetchPage(pageToken string, appending bool) tea.Cmd {
 	}
 }
 
+// switchProjectCmd returns a Cmd that opens a new gcplog.Client for
+// project, driven from the ":project <id>" command.
+func (m appModel) switchProjectCmd(project string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+		defer cancel()
+		client, err := gcplog.NewClient(ctx, project)
+		return projectSwitchedMsg{client: client, project: project, err: err}
+	}
+}
+
 func (m appModel) View() tea.View {
-	if m.mode == modeError && m.err != nil {
-		v := tea.NewView(m.renderHeader() + "\n" + errorStyle.Render("error: "+m.err.Error()) + "\n" + m.renderFooter())
-		v.AltScreen = true
-		return v
+	var body string
+	switch m.mode {
+	case modeError:
+		body = errorStyle.Render("error: " + m.err.Error())
+	case modeHelp:
+		body = helpText()
+	case modeFilterFocus:
+		body = m.list.View()
+	case modeCommand:
+		body = m.list.View()
+	case modeTail:
+		body = statusStyle.Render("tail mode — live streaming lands in M5. esc to go back.")
+	default:
+		body = m.list.View()
 	}
 
-	body := m.list.View()
-	content := m.renderHeader() + "\n" + body + "\n" + m.renderFooter()
+	var footer string
+	switch m.mode {
+	case modeFilterFocus:
+		footer = m.filterBar.View()
+	case modeCommand:
+		footer = m.command.View()
+	default:
+		footer = m.renderFooter()
+	}
+
+	content := m.renderHeader() + "\n" + body + "\n" + footer
 	v := tea.NewView(content)
 	v.AltScreen = true
 	return v

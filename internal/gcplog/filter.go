@@ -41,7 +41,10 @@ func (f FilterState) Build() string {
 	var clauses []string
 
 	if f.MinSeverity > logging.Default {
-		clauses = append(clauses, "severity>="+f.MinSeverity.String())
+		// logging.Severity.String() renders "Warning", "Error", etc.
+		// (title case); the filter language's canonical enum spelling
+		// is uppercase ("WARNING", "ERROR").
+		clauses = append(clauses, "severity>="+strings.ToUpper(f.MinSeverity.String()))
 	}
 	if f.LogName != "" {
 		clauses = append(clauses, fmt.Sprintf("logName:%s", quote(f.LogName)))
@@ -50,8 +53,12 @@ func (f FilterState) Build() string {
 		clauses = append(clauses, fmt.Sprintf("resource.type=%s", quote(f.ResourceType)))
 	}
 	if f.FreeText != "" {
-		q := quote(f.FreeText)
-		clauses = append(clauses, fmt.Sprintf("(textPayload:%s OR jsonPayload:%s)", q, q))
+		// jsonPayload is a nested/structured field: a bare `jsonPayload:"x"`
+		// comparison is rejected by the API ("Cannot match a nested type").
+		// SEARCH() is the Cloud Logging filter language's indexed
+		// free-text function and correctly covers textPayload,
+		// jsonPayload's string fields, and labels in one go.
+		clauses = append(clauses, fmt.Sprintf("SEARCH(%s)", quote(f.FreeText)))
 	}
 	if !f.Since.IsZero() {
 		clauses = append(clauses, fmt.Sprintf("timestamp>=%s", quote(f.Since.UTC().Format(time.RFC3339))))

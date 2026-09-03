@@ -12,11 +12,10 @@ import (
 func (m appModel) renderHeader() string {
 	left := headerStyle.Render("tailspin") + "  " + headerMetaStyle.Render(m.project)
 
-	filterDesc := m.filter.Build()
-	if filterDesc == "" {
-		filterDesc = "(no filter)"
+	middle := headerMetaStyle.Render(m.filter.Build())
+	if m.notice != "" {
+		middle = errorStyle.Render(m.notice)
 	}
-	middle := headerMetaStyle.Render(filterDesc)
 
 	right := headerMetaStyle.Render(fmt.Sprintf("%d entries", len(m.list.entries)))
 	if m.mode == modeTail {

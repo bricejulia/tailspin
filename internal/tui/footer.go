@@ -14,7 +14,7 @@ func (m appModel) renderFooter() string {
 	case modeError:
 		bindings = []key.Binding{keys.Quit}
 	default:
-		bindings = []key.Binding{keys.Up, keys.Down, keys.Enter, keys.Filter, keys.Command, keys.Tail, keys.Help, keys.Quit}
+		bindings = []key.Binding{keys.Up, keys.Down, keys.Enter, keys.Filter, keys.Command, keys.Tail, keys.Wrap, keys.Help, keys.Quit}
 	}
 
 	var out strings.Builder

@@ -15,9 +15,18 @@ type keyMap struct {
 	Filter   key.Binding
 	Command  key.Binding
 	Tail     key.Binding
+	Wrap     key.Binding
 	Help     key.Binding
 	Quit     key.Binding
 }
+
+// tabKey and shiftTabKey move focus between fields in the filter bar. They
+// aren't part of keyMap (and so don't show up in the footer) since they're
+// only meaningful while modeFilterFocus is active.
+var (
+	tabKey      = key.NewBinding(key.WithKeys("tab"))
+	shiftTabKey = key.NewBinding(key.WithKeys("shift+tab"))
+)
 
 var keys = keyMap{
 	Up: key.NewBinding(
@@ -55,6 +64,10 @@ var keys = keyMap{
 	Tail: key.NewBinding(
 		key.WithKeys("t"),
 		key.WithHelp("t", "tail"),
+	),
+	Wrap: key.NewBinding(
+		key.WithKeys("w"),
+		key.WithHelp("w", "wrap"),
 	),
 	Help: key.NewBinding(
 		key.WithKeys("?"),
