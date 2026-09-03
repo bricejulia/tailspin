@@ -60,7 +60,7 @@ tailspin --version
 | `/` | Filter (severity, log name, free text, time range) |
 | `:` | Command mode (see below) |
 | `t` | Tail (live streaming) |
-| `w` | Toggle h-scroll: normally the focused row auto-wraps to show its full message while every other row stays compact; h-scroll instead keeps every row one line, with `h`/`l` scrolling the table sideways |
+| `w` | Toggle wrap: by default every row is one line — `h`/`l` scrolls the table sideways to read the rest (`0`/`$` jump straight to the start/end); wrap instead reflows every row across as many lines as its message needs |
 | `r` | Refresh (re-run the current query from page 1) |
 | `?` | Help |
 | `q` | Quit |

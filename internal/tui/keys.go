@@ -83,7 +83,7 @@ var keys = keyMap{
 	),
 	Wrap: key.NewBinding(
 		key.WithKeys("w"),
-		key.WithHelp("w", "h-scroll"),
+		key.WithHelp("w", "wrap"),
 	),
 	Refresh: key.NewBinding(
 		key.WithKeys("r"),

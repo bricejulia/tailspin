@@ -43,10 +43,12 @@ var (
 				Background(colorSelectBg).
 				Bold(true)
 
-	// selectedMarkerStyle is the left-gutter "▎" glyph marking the
+	// selectedMarkerStyle is the left-gutter ">" glyph marking the
 	// selected row — a second, color-independent cue on top of the
 	// background so the selection reads clearly even on themes/profiles
-	// where the background tint alone is subtle.
+	// where the background tint alone is subtle. Plain ASCII: an earlier
+	// attempt with "▎" (U+258E) rendered as the literal text "\u{258e}"
+	// under some terminfo/width-table combination instead of the glyph.
 	selectedMarkerStyle = lipgloss.NewStyle().
 				Foreground(colorAccent).
 				Bold(true)

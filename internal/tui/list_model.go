@@ -16,7 +16,15 @@ import (
 // selection must get before the next page is lazily fetched.
 const prefetchThreshold = 5
 
-// gutterWidth is the left column reserved for the selection marker ("▎ ")
+// hscrollStep sizes the h/l horizontal-scroll step to a fraction of the
+// viewport width — a flat step of a handful of columns took upwards of a
+// hundred presses to cross a long jsonPayload line ("0"/"$" jump straight
+// to the ends; this just makes ordinary h/l usable too).
+func hscrollStep(width int) int {
+	return max(width/3, 10)
+}
+
+// gutterWidth is the left column reserved for the selection marker ("> ")
 // on the focused row, and matching blank space on every other row so
 // columns stay aligned.
 const gutterWidth = 2
@@ -33,16 +41,15 @@ type listModel struct {
 	hasMore       bool
 	loading       bool
 
-	// hscroll controls how rows wider than the terminal are handled:
-	// false (the default) auto-wraps the focused row across as many
-	// lines as its message needs, with continuation lines aligned under
-	// the message column, while every other row stays a compact single
-	// line — moving the selection is enough to read a long entry, no
-	// extra keypress needed. true (toggled with 'w') instead keeps every
-	// row single-line, uniformly, and lets h/l scroll the whole table
-	// horizontally — for reading wide content without the list's height
-	// jumping around as you navigate.
-	hscroll bool
+	// wrap controls how rows wider than the terminal are handled: false
+	// (the default) keeps every row a single line, full content, and
+	// lets h/l ($/0 to jump to the ends) scroll the whole table
+	// horizontally to read whatever doesn't fit. true (toggled with 'w')
+	// reflows every row across as many lines as its message needs, with
+	// continuation lines aligned under the message column — no
+	// horizontal scrolling needed, at the cost of the list getting a lot
+	// taller.
+	wrap bool
 
 	// pageStarts[i] is the entries index where the i-th fetched page
 	// begins; len(pageStarts) is how many pages are currently loaded.
@@ -57,8 +64,8 @@ type listModel struct {
 	pendingPageJump bool
 
 	// groupStart[i] is the physical viewport line where entries[i]
-	// begins; groupStart[len(entries)] is the total line count. Only the
-	// selected row can span more than one line (see hscroll above).
+	// begins; groupStart[len(entries)] is the total line count. Every
+	// row spans exactly one line unless wrap is on (see wrap above).
 	groupStart []int
 
 	width, height int
@@ -104,6 +111,7 @@ func (m *listModel) appendPage(page gcplog.Page) {
 	if m.pendingPageJump {
 		m.selected = newPageStart
 		m.pendingPageJump = false
+		m.resetHScrollOnMove()
 	}
 	m.render()
 	m.scrollIntoView()
@@ -114,6 +122,20 @@ func (m listModel) selectedEntry() (gcplog.Entry, bool) {
 		return gcplog.Entry{}, false
 	}
 	return m.entries[m.selected], true
+}
+
+// selectedRowEndOffset is the horizontal scroll offset that puts the end of
+// the focused row's own content flush with the right edge — used by the
+// "$" h-scroll shortcut. Deliberately not the viewport's overall
+// longest-loaded-line width: jumping to that instead left a short selected
+// row entirely blank whenever some unrelated row happened to be longer.
+func (m listModel) selectedRowEndOffset() int {
+	e, ok := m.selectedEntry()
+	if !ok {
+		return 0
+	}
+	full := gutter(true) + entryPrefix(e) + e.Summary
+	return lipgloss.Width(full) - m.width
 }
 
 // currentPageIndex returns which loaded page (an index into pageStarts)
@@ -143,6 +165,7 @@ func (m *listModel) gotoNextPage() bool {
 	idx := m.currentPageIndex()
 	if idx+1 < len(m.pageStarts) {
 		m.selected = m.pageStarts[idx+1]
+		m.resetHScrollOnMove()
 		m.render()
 		m.scrollIntoView()
 		return false
@@ -164,6 +187,7 @@ func (m *listModel) gotoPreviousPage() {
 	} else {
 		m.selected = m.pageStarts[idx-1]
 	}
+	m.resetHScrollOnMove()
 	m.render()
 	m.scrollIntoView()
 }
@@ -182,14 +206,22 @@ func (m listModel) Update(msg tea.Msg) (listModel, tea.Cmd) {
 		case key.Matches(keyMsg, keys.PageUp):
 			m.moveSelection(-m.height)
 		case key.Matches(keyMsg, keys.Wrap):
-			m.hscroll = !m.hscroll
+			m.wrap = !m.wrap
 			m.viewport.SetXOffset(0)
 			m.render()
 			m.scrollIntoView()
-		case m.hscroll && (keyMsg.String() == "left" || keyMsg.String() == "h"):
-			m.viewport.ScrollLeft(4)
-		case m.hscroll && (keyMsg.String() == "right" || keyMsg.String() == "l"):
-			m.viewport.ScrollRight(4)
+		case !m.wrap && (keyMsg.String() == "left" || keyMsg.String() == "h"):
+			m.viewport.ScrollLeft(hscrollStep(m.width))
+		case !m.wrap && (keyMsg.String() == "right" || keyMsg.String() == "l"):
+			m.viewport.ScrollRight(hscrollStep(m.width))
+		case !m.wrap && (keyMsg.String() == "0" || keyMsg.String() == "home"):
+			m.viewport.SetXOffset(0)
+		case !m.wrap && (keyMsg.String() == "$" || keyMsg.String() == "end"):
+			// The end of the *focused* row's own content, not the
+			// viewport's globally-longest loaded line — jumping to the
+			// latter left a short selected row entirely blank whenever
+			// some unrelated row happened to be much longer.
+			m.viewport.SetXOffset(m.selectedRowEndOffset())
 		}
 	}
 
@@ -211,8 +243,19 @@ func (m *listModel) moveSelection(delta int) {
 	if m.selected >= len(m.entries) {
 		m.selected = len(m.entries) - 1
 	}
+	m.resetHScrollOnMove()
 	m.render()
 	m.scrollIntoView()
+}
+
+// resetHScrollOnMove snaps the horizontal scroll position back to the left
+// edge whenever the selection moves in non-wrap mode: each row can be a
+// completely different length, so a horizontal offset scrolled into one
+// row's content isn't meaningful once you've moved to another.
+func (m *listModel) resetHScrollOnMove() {
+	if !m.wrap {
+		m.viewport.SetXOffset(0)
+	}
 }
 
 // scrollIntoView scrolls the viewport by the minimum amount needed to bring
@@ -287,24 +330,17 @@ func gutter(selected bool) string {
 	return strings.Repeat(" ", gutterWidth)
 }
 
-// renderRow renders entry i as one or more physical lines. Only the
-// selected row (i == m.selected) can span more than one line — see the
-// hscroll field doc for the two display modes.
+// renderRow renders entry i as one or more physical lines: every row wraps
+// (or none do) together — see the wrap field doc for the two modes.
 func (m listModel) renderRow(i int, e gcplog.Entry) []string {
 	selected := i == m.selected
 	prefix := gutter(selected) + entryPrefix(e)
 	prefixWidth := lipgloss.Width(prefix)
 
 	var rowLines []string
-	switch {
-	case m.hscroll:
-		// Uniform single-line rows; h/l scrolls the viewport
-		// horizontally to read whatever doesn't fit.
-		rowLines = []string{prefix + e.Summary}
-	case selected:
-		// The focused entry always shows its full message — reflowed
-		// across as many lines as it needs, continuation lines
-		// aligned under the message column.
+	if m.wrap {
+		// Every row reflows across as many lines as its message needs,
+		// continuation lines aligned under the message column.
 		avail := max(m.width-prefixWidth, 10)
 		indent := strings.Repeat(" ", prefixWidth)
 		for j, seg := range strings.Split(lipgloss.Wrap(e.Summary, avail, ""), "\n") {
@@ -314,10 +350,10 @@ func (m listModel) renderRow(i int, e gcplog.Entry) []string {
 				rowLines = append(rowLines, indent+seg)
 			}
 		}
-	default:
-		// Unselected rows stay compact: one line, clipped to fit.
-		avail := max(m.width-prefixWidth, 1)
-		rowLines = []string{prefix + truncate(e.Summary, avail)}
+	} else {
+		// Every row is one line, full content — h/l (0/$) scrolls the
+		// whole table horizontally to read whatever doesn't fit.
+		rowLines = []string{prefix + e.Summary}
 	}
 
 	if selected {

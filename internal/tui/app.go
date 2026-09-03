@@ -85,7 +85,11 @@ func New(client gcplog.Client, project string) appModel {
 		filterBar: newFilterBarModel(),
 		command:   newCommandModel(),
 		tail:      newTailModel(),
-		spinner:   spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(spinnerStyle)),
+		// Line ("|/-\") is plain ASCII — no risk of a Braille/block
+		// glyph not rendering on some font or terminfo combination (see
+		// the ">" selection-marker doc comment in styles.go for a case
+		// where that happened with a fancier character).
+		spinner: spinner.New(spinner.WithSpinner(spinner.Line), spinner.WithStyle(spinnerStyle)),
 	}
 }
 
