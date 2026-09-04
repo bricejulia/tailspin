@@ -85,7 +85,7 @@ returns to browse.
 | `:query` | `:raw` | Open the raw/advanced filter editor — `ctrl+s` runs it, `esc` cancels |
 | `:save <name>` | | Save the active query under `<name>` |
 | `:load <name>` | | Load a saved query by name |
-| `:queries` | | List saved queries |
+| `:queries` | | List saved queries (`j`/`k` select, `enter` runs one) |
 | `:help` | `:h`, `:?` | Show the help screen |
 | `:quit` | `:q` | Quit |
 
@@ -115,7 +115,7 @@ the filter bar the normal way switches back.
 `:save <name>` saves the active query (the raw query if one's active,
 otherwise whatever the filter bar currently builds) under `<name>`,
 independent of any time range. `:load <name>` restores it. `:queries`
-lists what's saved.
+lists what's saved — `j`/`k` to select, `enter` to run one directly.
 
 Saved queries live in a plain JSON file at
 `$XDG_CONFIG_HOME/tailspin/queries.json` (falling back to

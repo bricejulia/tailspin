@@ -20,7 +20,7 @@ func (m appModel) renderFooter() string {
 	case modeQuery:
 		bindings = []key.Binding{querySubmitKey, keys.Back}
 	case modeQueries:
-		bindings = []key.Binding{keys.Back, keys.Quit}
+		bindings = []key.Binding{keys.Up, keys.Down, runQueryKey, keys.Back, keys.Quit}
 	default:
 		bindings = []key.Binding{keys.Up, keys.Down, pageNavKey, keys.Enter, keys.Filter, keys.Command, keys.Tail, keys.Wrap, keys.Refresh, keys.Help, keys.Quit}
 	}

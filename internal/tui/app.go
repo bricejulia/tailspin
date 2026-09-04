@@ -61,8 +61,11 @@ type appModel struct {
 	query     queryModel
 	spinner   spinner.Model
 
-	// savedQueries is populated by ":queries" for modeQueries' View to render.
-	savedQueries []config.SavedQuery
+	// savedQueries is populated by ":queries" for modeQueries' View to
+	// render; queriesSelected is the highlighted entry within it, reset
+	// to 0 each time the list is (re)loaded.
+	savedQueries    []config.SavedQuery
+	queriesSelected int
 
 	// tailGen identifies the current tail session; tailStartedMsg/
 	// tailEventMsg carry the gen they belong to, so a message from a
@@ -124,6 +127,9 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
+
+	case tea.PasteMsg:
+		return m.handlePaste(msg)
 
 	case entriesLoadedMsg:
 		return m.handleEntriesLoaded(msg)
@@ -192,7 +198,23 @@ func (m appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.query, cmd = m.query.Update(msg)
 		return m, cmd
 
-	case modeHelp, modeQueries:
+	case modeQueries:
+		switch msg.String() {
+		case "esc", "q":
+			m.mode = modeBrowse
+			return m, nil
+		case "j", "down":
+			m.moveQueriesSelection(1)
+			return m, nil
+		case "k", "up":
+			m.moveQueriesSelection(-1)
+			return m, nil
+		case "enter":
+			return m.runSelectedQuery()
+		}
+		return m, nil
+
+	case modeHelp:
 		switch msg.String() {
 		case "esc", "q", "?":
 			m.mode = modeBrowse
@@ -288,6 +310,31 @@ func (m appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// unmatched key).
 	}
 	return m, nil
+}
+
+// handlePaste routes a bracketed-paste event to whichever sub-model is
+// currently editable, the same three modes handleKey special-cases for
+// text input. Without this, a paste (tea.PasteMsg, not a stream of
+// tea.KeyPressMsg) never reached any sub-model at all — the underlying
+// textinput/textarea widgets both handle tea.PasteMsg correctly, this was
+// purely a missing routing case here.
+func (m appModel) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
+	switch m.mode {
+	case modeFilterFocus:
+		var cmd tea.Cmd
+		m.filterBar, cmd = m.filterBar.Update(msg)
+		return m, cmd
+	case modeCommand:
+		var cmd tea.Cmd
+		m.command, cmd = m.command.Update(msg)
+		return m, cmd
+	case modeQuery:
+		var cmd tea.Cmd
+		m.query, cmd = m.query.Update(msg)
+		return m, cmd
+	default:
+		return m, nil
+	}
 }
 
 func (m appModel) handleEntriesLoaded(msg entriesLoadedMsg) (tea.Model, tea.Cmd) {

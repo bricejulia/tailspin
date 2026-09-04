@@ -36,6 +36,12 @@ var (
 // separate bindings in keyMap.
 var pageNavKey = key.NewBinding(key.WithKeys("n", "N"), key.WithHelp("n/N", "next/prev page"))
 
+// runQueryKey is a footer-only display binding for modeQueries: same key
+// as keys.Enter, but "run" reads better than keys.Enter's "view" there.
+// Matching for modeQueries' own enter handling is done by literal string
+// comparison in handleKey, not against this binding.
+var runQueryKey = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "run"))
+
 var keys = keyMap{
 	Up: key.NewBinding(
 		key.WithKeys("k", "up"),

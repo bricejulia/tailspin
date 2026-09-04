@@ -41,13 +41,29 @@ func (m appModel) rightStatus() string {
 // active filter, entry count, and (once tail mode lands) a LIVE indicator.
 func (m appModel) renderHeader() string {
 	left := headerStyle.Render("tailspin") + "  " + headerMetaStyle.Render(m.project)
-
-	middle := headerMetaStyle.Render(m.filter.Build())
-	if m.notice != "" {
-		middle = errorStyle.Render(m.notice)
-	}
-
 	right := m.rightStatus()
+
+	middleText := m.filter.Build()
+	middleStyle := headerMetaStyle
+	if m.notice != "" {
+		middleText = m.notice
+		middleStyle = errorStyle
+	}
+	// The header must always render as exactly one physical terminal
+	// line. A raw query can embed newlines (Cloud Logging treats them as
+	// AND, same as the structured fields' " AND " join), and if that
+	// leaks into the header unclipped, the header silently grows to
+	// multiple lines — pushing everything below it, including the
+	// footer, past the bottom of the screen (it's still there and still
+	// responding to input, just scrolled out of view). Collapsing every
+	// run of whitespace (including embedded newlines) to a single space
+	// and then clipping to what's actually available keeps this to one
+	// line no matter what the filter or notice contains.
+	middleText = strings.Join(strings.Fields(middleText), " ")
+	if avail := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 4; avail > 0 {
+		middleText = truncate(middleText, avail)
+	}
+	middle := middleStyle.Render(middleText)
 
 	bar := lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", middle)
 	return padBetween(bar, right, m.width)

@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"cloud.google.com/go/logging"
 
+	"github.com/bricejulia/tailspin/internal/config"
 	"github.com/bricejulia/tailspin/internal/gcplog"
 	"github.com/bricejulia/tailspin/internal/gcplog/gcplogtest"
 )
@@ -224,6 +225,67 @@ func TestLoadMissingQueryReportsNotice(t *testing.T) {
 	m2 := updated.(appModel)
 	if !strings.Contains(m2.notice, "no saved query named missing") {
 		t.Errorf("notice = %q, want it to report the missing query", m2.notice)
+	}
+}
+
+func TestQueriesSelectionAndRun(t *testing.T) {
+	fake := &gcplogtest.Client{Pages: []gcplog.Page{{}}}
+	m := New(fake, "test-project")
+	m.mode = modeQueries
+	m.savedQueries = []config.SavedQuery{
+		{Name: "a", Filter: "severity>=ERROR"},
+		{Name: "b", Filter: "severity>=WARNING"},
+	}
+
+	updated, _ := m.Update(textKey("j"))
+	m = updated.(appModel)
+	if m.queriesSelected != 1 {
+		t.Fatalf("queriesSelected = %d, want 1 after j", m.queriesSelected)
+	}
+
+	// Clamped at the last entry.
+	updated, _ = m.Update(textKey("j"))
+	m = updated.(appModel)
+	if m.queriesSelected != 1 {
+		t.Errorf("queriesSelected = %d, want clamped at 1", m.queriesSelected)
+	}
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(appModel)
+	if m.filter.RawQuery != "severity>=WARNING" {
+		t.Errorf("RawQuery = %q, want the selected (index 1) query", m.filter.RawQuery)
+	}
+	if m.mode != modeBrowse {
+		t.Errorf("mode = %v, want modeBrowse after running a query", m.mode)
+	}
+	if _, ok := findMsg[entriesLoadedMsg](cmd); !ok {
+		t.Error("expected running a query to trigger a fetch")
+	}
+}
+
+func TestPasteRoutesToQueryEditor(t *testing.T) {
+	m := New(&gcplogtest.Client{}, "test-project")
+	m.mode = modeQuery
+	m.query.focus() // textarea.Update ignores all input, paste included, while unfocused
+
+	pasted := `resource.type="k8s_container"`
+	updated, _ := m.Update(tea.PasteMsg{Content: pasted})
+	m2 := updated.(appModel)
+	if got := m2.query.textarea.Value(); got != pasted {
+		t.Errorf("query editor value = %q after paste, want %q", got, pasted)
+	}
+}
+
+func TestRenderHeaderNeverWraps(t *testing.T) {
+	m := New(&gcplogtest.Client{}, "test-project")
+	m.width = 80
+	m.filter.RawQuery = "resource.type=\"k8s_container\"\n" +
+		"resource.labels.cluster_name=\"my-cluster\"\n" +
+		"resource.labels.container_name=\"my-container\"\n" +
+		"resource.labels.namespace_name=\"my-namespace\""
+
+	if header := m.renderHeader(); strings.Contains(header, "\n") {
+		t.Errorf("renderHeader() contains a newline, want exactly one physical line: %q", header)
 	}
 }
 

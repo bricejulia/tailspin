@@ -32,7 +32,7 @@ func helpText() string {
 		footerKeyStyle.Render(":query") + " (:raw)         open the raw/advanced filter editor (ctrl+s runs it, esc cancels)",
 		footerKeyStyle.Render(":save <name>") + "        save the active query under <name>",
 		footerKeyStyle.Render(":load <name>") + "        load a saved query by name",
-		footerKeyStyle.Render(":queries") + "            list saved queries",
+		footerKeyStyle.Render(":queries") + "            list saved queries (j/k select, enter runs one)",
 		footerKeyStyle.Render(":help") + " (:h, :?)       this screen",
 		footerKeyStyle.Render(":quit") + " (:q)           quit",
 		"",

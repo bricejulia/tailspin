@@ -64,11 +64,40 @@ func (m appModel) showSavedQueries() (appModel, tea.Cmd) {
 		return m, nil
 	}
 	m.savedQueries = queries
+	m.queriesSelected = 0
 	m.mode = modeQueries
 	return m, nil
 }
 
+// moveQueriesSelection clamps the selected saved-query index by delta —
+// same shape as listModel.moveSelection, just simple enough (no scrolling
+// needed) not to warrant its own sub-model.
+func (m *appModel) moveQueriesSelection(delta int) {
+	if len(m.savedQueries) == 0 {
+		return
+	}
+	m.queriesSelected += delta
+	if m.queriesSelected < 0 {
+		m.queriesSelected = 0
+	}
+	if m.queriesSelected >= len(m.savedQueries) {
+		m.queriesSelected = len(m.savedQueries) - 1
+	}
+}
+
+// runSelectedQuery loads the currently-highlighted saved query, the same
+// way :load <name> does.
+func (m appModel) runSelectedQuery() (appModel, tea.Cmd) {
+	if m.queriesSelected < 0 || m.queriesSelected >= len(m.savedQueries) {
+		return m, nil
+	}
+	return m.applyRawQuery(m.savedQueries[m.queriesSelected].Filter)
+}
+
 // queriesListText renders modeQueries' body, styled like help.go's helpText.
+// The highlighted entry (see appModel.queriesSelected) uses the same
+// full-line background + marker convention as the browse list's selected
+// row, so "which one will enter run" is unambiguous.
 func (m appModel) queriesListText() string {
 	lines := []string{
 		headerStyle.Render("tailspin — saved queries"),
@@ -77,17 +106,21 @@ func (m appModel) queriesListText() string {
 	if len(m.savedQueries) == 0 {
 		lines = append(lines, statusStyle.Render("no saved queries yet — \":save <name>\" saves the active filter"))
 	} else {
-		for _, q := range m.savedQueries {
-			lines = append(lines, footerKeyStyle.Render(q.Name))
+		for i, q := range m.savedQueries {
+			if i == m.queriesSelected {
+				lines = append(lines, selectedRowStyle.Render(padToWidth("> "+q.Name, m.width)))
+			} else {
+				lines = append(lines, "  "+footerKeyStyle.Render(q.Name))
+			}
 			if q.Description != "" {
-				lines = append(lines, "  "+statusStyle.Render(q.Description))
+				lines = append(lines, "    "+statusStyle.Render(q.Description))
 			}
 			for clause := range strings.SplitSeq(q.Filter, "\n") {
-				lines = append(lines, "  "+headerMetaStyle.Render(clause))
+				lines = append(lines, "    "+headerMetaStyle.Render(clause))
 			}
 			lines = append(lines, "")
 		}
 	}
-	lines = append(lines, statusStyle.Render("esc or q to close"))
+	lines = append(lines, statusStyle.Render("j/k select · enter run · esc/q close"))
 	return strings.Join(lines, "\n")
 }
