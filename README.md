@@ -1,5 +1,11 @@
 # tailspin
 
+
+[![CI](https://github.com/bricejulia/tailspin/actions/workflows/ci.yml/badge.svg)](https://github.com/bricejulia/tailspin/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+![tailspin banner](https://github.com/bricejulia/tailspin/blob/main/assets/tailspin.png?raw=true)
+
 A [k9s](https://k9scli.io/)-inspired terminal UI for exploring [GCP Cloud
 Logging](https://cloud.google.com/logging), built with [Bubble
 Tea](https://github.com/charmbracelet/bubbletea).
@@ -15,15 +21,28 @@ tailspin talks to Cloud Logging directly through the Go client libraries
 
 ## Install
 
-```sh
+```bash
+curl -fsSL https://raw.githubusercontent.com/bricejulia/tailspin/main/install.sh | sh
+```
+
+Or with Homebrew:
+
+```bash
+brew install bricejulia/tap/tailspin
+```
+
+> **macOS:** if Gatekeeper blocks the binary on first run, remove the quarantine attribute:
+> `xattr -d com.apple.quarantine $(which tailspin)`, or allow it manually in
+> System Settings → Privacy & Security.
+
+Or with Go:
+
+```bash
 go install github.com/bricejulia/tailspin/cmd/tailspin@latest
 ```
 
-Or build from a clone of this repo:
+You can also download the latest binaries from the [release page](https://github.com/bricejulia/tailspin/releases). If you use this method, don't forget to check for updates regularly!
 
-```sh
-go build -o tailspin ./cmd/tailspin
-```
 
 ## Setup
 
@@ -147,3 +166,8 @@ talks to GCP, kept behind a small `Client` interface with a hand-written
 fake so `internal/tui` can be tested without any network access. See
 `internal/gcplog/filter_test.go` and `internal/config/config_test.go` for
 the parts of the GCP wiring that are pure functions and directly testable.
+
+
+## Status
+
+tailspin is a work in progress and a learning project.
