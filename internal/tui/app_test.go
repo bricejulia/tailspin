@@ -301,6 +301,23 @@ func TestRenderHeaderNeverWraps(t *testing.T) {
 	}
 }
 
+func TestRenderHeaderTopKeepsStatusVisibleWhenTight(t *testing.T) {
+	// A long project name plus a status that together don't fit width —
+	// this used to silently drop the whole right-hand status instead of
+	// shrinking the project name.
+	m := New(&gcplogtest.Client{}, "a-very-long-google-cloud-project-id-1234567890")
+	m.width = 40
+	m.list.entries = entries(5)
+
+	top := m.renderHeaderTop()
+	if w := lipgloss.Width(top); w > m.width {
+		t.Errorf("header top line is %d cols wide, want <= %d: %q", w, m.width, top)
+	}
+	if !strings.Contains(top, "5 entries") {
+		t.Errorf("header top line = %q, want the entry count still visible even when tight", top)
+	}
+}
+
 // errFake is a sentinel error used where the test only cares that *an*
 // error occurred, not its exact text.
 var errFake = fakeErr("boom")

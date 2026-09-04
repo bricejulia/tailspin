@@ -431,3 +431,20 @@ func truncate(s string, n int) string {
 	}
 	return s[:n-1] + "…"
 }
+
+// truncateMiddle clips s to n bytes, keeping both the start and the end
+// (eliding a stretch from the middle instead) — for text where losing the
+// tail outright is worse than losing something in between. The header's
+// query line uses this: Build() always appends the timestamp clause at
+// the very end, so plain head-truncation could never show it at all.
+func truncateMiddle(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	if n <= 1 {
+		return s[:n]
+	}
+	headLen := (n - 1) / 2
+	tailLen := n - 1 - headLen
+	return s[:headLen] + "…" + s[len(s)-tailLen:]
+}
