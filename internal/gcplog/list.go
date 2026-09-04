@@ -2,6 +2,7 @@ package gcplog
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"cloud.google.com/go/logging"
@@ -18,9 +19,14 @@ func (c *client) ListEntries(ctx context.Context, f FilterState, pageToken strin
 	pager := iterator.NewPager(it, int(pageSize), pageToken)
 	var sdkEntries []*logging.Entry
 	nextToken, err := pager.NextPage(&sdkEntries)
-	if err != nil {
+	if err != nil && !errors.Is(err, iterator.Done) {
 		return Page{}, fmt.Errorf("listing log entries for project %q: %w", c.project, err)
 	}
+	// iterator.Pager.NextPage surfaces iterator.Done as an error rather
+	// than an empty page when the underlying query matches zero entries
+	// from the very first call (as opposed to running out of items after
+	// some were already returned, which it handles fine) — a filter
+	// that legitimately matches nothing is not a failure.
 
 	entries := make([]Entry, len(sdkEntries))
 	for i, e := range sdkEntries {

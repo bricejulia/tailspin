@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -130,6 +131,99 @@ func TestTailStaleGenerationIgnored(t *testing.T) {
 	}
 	if cmd != nil {
 		t.Error("a stale tailStartedMsg should not issue a wait Cmd")
+	}
+}
+
+func TestQueryCommandOpensQueryModeSeeded(t *testing.T) {
+	m := New(&gcplogtest.Client{}, "test-project")
+	m.filter.RawQuery = `resource.type="k8s_container"`
+
+	updated, _ := m.Update(commandSubmittedMsg{cmd: parsedCommand{Kind: cmdQuery}})
+	m2 := updated.(appModel)
+	if m2.mode != modeQuery {
+		t.Errorf("mode = %v, want modeQuery", m2.mode)
+	}
+	if got := m2.query.textarea.Value(); got != m.filter.RawQuery {
+		t.Errorf("query editor seeded with %q, want %q", got, m.filter.RawQuery)
+	}
+}
+
+func TestQuerySubmittedAppliesRawQueryAndFetches(t *testing.T) {
+	fake := &gcplogtest.Client{Pages: []gcplog.Page{{}}}
+	m := New(fake, "test-project")
+	m.filter.MinSeverity = logging.Error
+	m.filter.LogName = "syslog"
+
+	rawQuery := "resource.type=\"k8s_container\"\nresource.labels.cluster_name=\"my-cluster\""
+	updated, cmd := m.Update(querySubmittedMsg{rawQuery: rawQuery})
+	m2 := updated.(appModel)
+
+	if m2.filter.RawQuery != rawQuery {
+		t.Errorf("RawQuery = %q, want %q", m2.filter.RawQuery, rawQuery)
+	}
+	if m2.filter.MinSeverity != 0 || m2.filter.LogName != "" {
+		t.Errorf("structured fields not cleared: %+v", m2.filter)
+	}
+	if m2.mode != modeBrowse {
+		t.Errorf("mode = %v, want modeBrowse", m2.mode)
+	}
+	if _, ok := findMsg[entriesLoadedMsg](cmd); !ok {
+		t.Error("expected the submission to trigger a fetch")
+	}
+}
+
+func TestApplyRawQuery_DefaultsSinceWhenZero(t *testing.T) {
+	m := New(&gcplogtest.Client{}, "test-project")
+	m.filter.Since = time.Time{} // simulate a zeroed Since
+
+	updated, _ := m.applyRawQuery(`resource.type="k8s_container"`)
+	if updated.filter.Since.IsZero() {
+		t.Error("Since is still zero after applyRawQuery, want it resolved to a default lookback")
+	}
+}
+
+func TestSaveLoadQueriesCommands(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	fake := &gcplogtest.Client{Pages: []gcplog.Page{{}}}
+	m := New(fake, "test-project")
+	m.filter.RawQuery = `resource.type="k8s_container"`
+
+	updated, _ := m.Update(commandSubmittedMsg{cmd: parsedCommand{Kind: cmdSave, Arg: "k8s-test"}})
+	m = updated.(appModel)
+	if !strings.Contains(m.notice, "saved query k8s-test") {
+		t.Errorf("notice = %q, want it to confirm the save", m.notice)
+	}
+
+	// Clear the active filter, then reload it by name.
+	m.filter.RawQuery = ""
+	updated, cmd := m.Update(commandSubmittedMsg{cmd: parsedCommand{Kind: cmdLoad, Arg: "k8s-test"}})
+	m = updated.(appModel)
+	if m.filter.RawQuery != `resource.type="k8s_container"` {
+		t.Errorf("RawQuery after load = %q, want the saved query restored", m.filter.RawQuery)
+	}
+	if _, ok := findMsg[entriesLoadedMsg](cmd); !ok {
+		t.Error("expected :load to trigger a fetch")
+	}
+
+	updated, _ = m.Update(commandSubmittedMsg{cmd: parsedCommand{Kind: cmdQueries}})
+	m = updated.(appModel)
+	if m.mode != modeQueries {
+		t.Errorf("mode = %v, want modeQueries", m.mode)
+	}
+	if len(m.savedQueries) != 1 || m.savedQueries[0].Name != "k8s-test" {
+		t.Errorf("savedQueries = %+v, want one entry named k8s-test", m.savedQueries)
+	}
+}
+
+func TestLoadMissingQueryReportsNotice(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m := New(&gcplogtest.Client{}, "test-project")
+
+	updated, _ := m.Update(commandSubmittedMsg{cmd: parsedCommand{Kind: cmdLoad, Arg: "missing"}})
+	m2 := updated.(appModel)
+	if !strings.Contains(m2.notice, "no saved query named missing") {
+		t.Errorf("notice = %q, want it to report the missing query", m2.notice)
 	}
 }
 

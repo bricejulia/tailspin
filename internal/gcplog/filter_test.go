@@ -56,6 +56,35 @@ func TestFilterStateBuild(t *testing.T) {
 			},
 			want: `severity>=ERROR AND logName:"syslog" AND resource.type="gce_instance" AND SEARCH("boom") AND timestamp>="2026-09-03T12:00:00Z"`,
 		},
+		{
+			name: "raw query alone",
+			f:    FilterState{RawQuery: `resource.type="k8s_container"`},
+			want: `(resource.type="k8s_container")`,
+		},
+		{
+			name: "raw query with time bound",
+			f: FilterState{
+				RawQuery: `resource.type="k8s_container"`,
+				Since:    fixedTime,
+			},
+			want: `(resource.type="k8s_container") AND timestamp>="2026-09-03T12:00:00Z"`,
+		},
+		{
+			name: "raw query with embedded newline round-trips unchanged",
+			f: FilterState{
+				RawQuery: "resource.type=\"k8s_container\"\nresource.labels.cluster_name=\"my-cluster\"",
+			},
+			want: "(resource.type=\"k8s_container\"\nresource.labels.cluster_name=\"my-cluster\")",
+		},
+		{
+			name: "raw query wins over structured fields",
+			f: FilterState{
+				MinSeverity: logging.Error,
+				LogName:     "syslog",
+				RawQuery:    `resource.type="k8s_container"`,
+			},
+			want: `(resource.type="k8s_container")`,
+		},
 	}
 
 	for _, tc := range cases {
@@ -63,6 +92,52 @@ func TestFilterStateBuild(t *testing.T) {
 			got := tc.f.Build()
 			if got != tc.want {
 				t.Errorf("Build() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFilterStateQuery(t *testing.T) {
+	cases := []struct {
+		name string
+		f    FilterState
+		want string
+	}{
+		{
+			name: "empty",
+			f:    FilterState{},
+			want: "",
+		},
+		{
+			name: "structured fields, no time bound",
+			f:    FilterState{MinSeverity: logging.Error, LogName: "syslog"},
+			want: `severity>=ERROR AND logName:"syslog"`,
+		},
+		{
+			name: "since is excluded even when set",
+			f: FilterState{
+				MinSeverity: logging.Warning,
+				Since:       time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC),
+			},
+			want: `severity>=WARNING`,
+		},
+		{
+			name: "raw query returned verbatim, untrimmed input trimmed",
+			f:    FilterState{RawQuery: "  resource.type=\"k8s_container\"  "},
+			want: `resource.type="k8s_container"`,
+		},
+		{
+			name: "raw query wins over structured fields",
+			f:    FilterState{MinSeverity: logging.Error, RawQuery: `resource.type="k8s_container"`},
+			want: `resource.type="k8s_container"`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.f.Query()
+			if got != tc.want {
+				t.Errorf("Query() = %q, want %q", got, tc.want)
 			}
 		})
 	}

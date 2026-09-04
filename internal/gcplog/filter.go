@@ -17,6 +17,19 @@ type FilterState struct {
 	ResourceType string
 	FreeText     string
 
+	// RawQuery, when non-empty, is used verbatim as the query body
+	// instead of the four fields above (mutually exclusive, not
+	// combined — see Query). It may itself be a multi-line, multi-clause
+	// Cloud Logging filter expression (e.g. pasted from Cloud Console's
+	// query builder); the filter language treats newline-separated
+	// clauses as implicitly ANDed, same as explicit "AND".
+	//
+	// The Since/Until invariant below applies to RawQuery exactly as it
+	// does to the structured fields: a raw query with no timestamp
+	// clause of its own must not be allowed to fall through to
+	// logadmin's non-deterministic default either.
+	RawQuery string
+
 	// Since and Until bound the query's time range. Zero means unbounded.
 	//
 	// Gotcha: if a FilterState with a zero Since builds a filter string
@@ -36,10 +49,17 @@ type FilterState struct {
 	Until time.Time
 }
 
-// Build renders f as a Cloud Logging filter expression.
-func (f FilterState) Build() string {
-	var clauses []string
+// Query renders the reusable, non-time-bound part of f: RawQuery
+// (trimmed) if set, otherwise the same structured-field clauses Build
+// uses. Since/Until are deliberately excluded — this is what gets saved
+// as a favorite, and a saved favorite should apply relative to "now" when
+// reloaded, not to a frozen absolute timestamp from when it was saved.
+func (f FilterState) Query() string {
+	if raw := strings.TrimSpace(f.RawQuery); raw != "" {
+		return raw
+	}
 
+	var clauses []string
 	if f.MinSeverity > logging.Default {
 		// logging.Severity.String() renders "Warning", "Error", etc.
 		// (title case); the filter language's canonical enum spelling
@@ -59,6 +79,29 @@ func (f FilterState) Build() string {
 		// free-text function and correctly covers textPayload,
 		// jsonPayload's string fields, and labels in one go.
 		clauses = append(clauses, fmt.Sprintf("SEARCH(%s)", quote(f.FreeText)))
+	}
+	return strings.Join(clauses, " AND ")
+}
+
+// Build renders f as a full Cloud Logging filter expression: Query()
+// plus the Since/Until time bound, always ANDed on regardless of whether
+// Query() came from RawQuery or the structured fields (see the Since doc
+// comment above for why that's non-negotiable).
+func (f FilterState) Build() string {
+	var clauses []string
+
+	if q := f.Query(); q != "" {
+		if strings.TrimSpace(f.RawQuery) != "" {
+			// Parenthesized only in the raw case: a pasted query may
+			// contain a top-level OR, and ANDing the time bound onto
+			// it unparenthesized would silently change precedence.
+			// The structured-fields case is already an explicit
+			// AND-chain, so no parens there — keeps Build()'s output
+			// for that case unchanged.
+			clauses = append(clauses, "("+q+")")
+		} else {
+			clauses = append(clauses, q)
+		}
 	}
 	if !f.Since.IsZero() {
 		clauses = append(clauses, fmt.Sprintf("timestamp>=%s", quote(f.Since.UTC().Format(time.RFC3339))))

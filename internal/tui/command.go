@@ -15,6 +15,10 @@ const (
 	cmdProject
 	cmdHelp
 	cmdQuit
+	cmdQuery
+	cmdSave
+	cmdLoad
+	cmdQueries
 )
 
 // parsedCommand is the result of parsing a ":" command line.
@@ -47,6 +51,20 @@ func parseCommand(input string) (parsedCommand, error) {
 		return parsedCommand{Kind: cmdHelp}, nil
 	case "quit", "q":
 		return parsedCommand{Kind: cmdQuit}, nil
+	case "query", "raw":
+		return parsedCommand{Kind: cmdQuery}, nil
+	case "save":
+		if len(fields) < 2 {
+			return parsedCommand{}, fmt.Errorf("usage: save <name>")
+		}
+		return parsedCommand{Kind: cmdSave, Arg: fields[1]}, nil
+	case "load":
+		if len(fields) < 2 {
+			return parsedCommand{}, fmt.Errorf("usage: load <name>")
+		}
+		return parsedCommand{Kind: cmdLoad, Arg: fields[1]}, nil
+	case "queries":
+		return parsedCommand{Kind: cmdQueries}, nil
 	default:
 		return parsedCommand{}, fmt.Errorf("unknown command %q", name)
 	}

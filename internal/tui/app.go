@@ -6,12 +6,14 @@ package tui
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/bricejulia/tailspin/internal/config"
 	"github.com/bricejulia/tailspin/internal/gcplog"
 )
 
@@ -28,6 +30,8 @@ const (
 	modeTail
 	modeHelp
 	modeError
+	modeQuery   // ":query"'s full-screen raw/advanced filter editor
+	modeQueries // ":queries"'s static list of saved favorites
 )
 
 const pageSize = 50
@@ -54,7 +58,11 @@ type appModel struct {
 	filterBar filterBarModel
 	command   commandModel
 	tail      tailModel
+	query     queryModel
 	spinner   spinner.Model
+
+	// savedQueries is populated by ":queries" for modeQueries' View to render.
+	savedQueries []config.SavedQuery
 
 	// tailGen identifies the current tail session; tailStartedMsg/
 	// tailEventMsg carry the gen they belong to, so a message from a
@@ -89,6 +97,7 @@ func New(client gcplog.Client, project string) appModel {
 		filterBar: newFilterBarModel(),
 		command:   newCommandModel(),
 		tail:      newTailModel(),
+		query:     newQueryModel(),
 		// Line ("|/-\") is plain ASCII — no risk of a Braille/block
 		// glyph not rendering on some font or terminfo combination (see
 		// the ">" selection-marker doc comment in styles.go for a case
@@ -110,6 +119,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.list.SetSize(m.width, m.contentHeight())
 		m.detail.SetSize(m.width, m.contentHeight())
 		m.tail.SetSize(m.width, m.contentHeight())
+		m.query.SetSize(m.width, m.contentHeight())
 		return m, nil
 
 	case tea.KeyPressMsg:
@@ -126,6 +136,9 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case commandSubmittedMsg:
 		return m.handleCommand(msg.cmd)
+
+	case querySubmittedMsg:
+		return m.applyRawQuery(msg.rawQuery)
 
 	case projectSwitchedMsg:
 		return m.handleProjectSwitched(msg)
@@ -170,7 +183,16 @@ func (m appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.command, cmd = m.command.Update(msg)
 		return m, cmd
 
-	case modeHelp:
+	case modeQuery:
+		if msg.String() == "esc" {
+			m.mode = modeBrowse
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.query, cmd = m.query.Update(msg)
+		return m, cmd
+
+	case modeHelp, modeQueries:
 		switch msg.String() {
 		case "esc", "q", "?":
 			m.mode = modeBrowse
@@ -302,6 +324,16 @@ func (m appModel) handleCommand(cmd parsedCommand) (tea.Model, tea.Cmd) {
 		m.mode = modeBrowse
 		m.notice = "switching to project " + cmd.Arg + "…"
 		return m, m.switchProjectCmd(cmd.Arg)
+	case cmdQuery:
+		m.query.seed(m.filter.RawQuery)
+		m.mode = modeQuery
+		return m, m.query.focus()
+	case cmdSave:
+		return m.saveCurrentQuery(cmd.Arg)
+	case cmdLoad:
+		return m.loadSavedQuery(cmd.Arg)
+	case cmdQueries:
+		return m.showSavedQueries()
 	default:
 		// cmdUnknown never reaches here: command_model only emits
 		// commandSubmittedMsg for a successfully-parsed command.
@@ -410,6 +442,26 @@ func (m appModel) contentHeight() int {
 	return h
 }
 
+// applyRawQuery installs raw as the active RawQuery, clears the mutually
+// exclusive structured fields, and refetches from page 1. If Since is
+// currently zero (e.g. right after a bare :query with no filter bar ever
+// used), it's resolved to defaultLookback here — RawQuery does not exempt
+// a FilterState from the Since invariant documented on FilterState.Since,
+// any more than the structured fields do.
+func (m appModel) applyRawQuery(raw string) (appModel, tea.Cmd) {
+	m.filter.RawQuery = strings.TrimSpace(raw)
+	m.filter.MinSeverity = 0
+	m.filter.LogName = ""
+	m.filter.ResourceType = ""
+	m.filter.FreeText = ""
+	if m.filter.Since.IsZero() {
+		m.filter.Since = time.Now().Add(-defaultLookback)
+	}
+	m.notice = ""
+	m.mode = modeBrowse
+	return m.triggerFetch("", false)
+}
+
 // triggerFetch marks a fetch as in flight (so both listModel's own
 // "loading…" empty-state text and the header's spinner reflect it) and
 // returns the batched fetch + spinner-tick Cmd. Every fetchPage call that
@@ -461,6 +513,10 @@ func (m appModel) View() tea.View {
 		body = m.detail.View()
 	case modeTail:
 		body = m.tail.View()
+	case modeQuery:
+		body = m.query.View()
+	case modeQueries:
+		body = m.queriesListText()
 	default:
 		body = m.list.View()
 	}

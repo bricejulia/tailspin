@@ -82,8 +82,56 @@ returns to browse.
 | `:browse` | `:b` | Return to browse mode |
 | `:tail` | `:t` | Switch to tail mode |
 | `:project <id>` | `:p <id>` | Switch to a different GCP project |
+| `:query` | `:raw` | Open the raw/advanced filter editor — `ctrl+s` runs it, `esc` cancels |
+| `:save <name>` | | Save the active query under `<name>` |
+| `:load <name>` | | Load a saved query by name |
+| `:queries` | | List saved queries |
 | `:help` | `:h`, `:?` | Show the help screen |
 | `:quit` | `:q` | Quit |
+
+## Advanced queries
+
+The filter bar (`/`) covers severity, log name, free text, and time range,
+but can't express arbitrary comparisons like `resource.labels.*`. For that,
+`:query` (or `:raw`) opens a full multi-line editor — paste or type any
+Cloud Logging filter expression, including the kind Cloud Console's own
+query builder produces:
+
+```
+resource.type="k8s_container"
+resource.labels.cluster_name="my-cluster"
+resource.labels.container_name="my-container"
+resource.labels.namespace_name="my-namespace"
+```
+
+(Cloud Logging treats newline-separated clauses as implicitly ANDed, same
+as explicit `AND`.) `ctrl+s` runs it — a time-range bound is still applied
+on top automatically, same as browse mode's default. A raw query replaces
+the filter bar's structured fields (not combined with them); submitting
+the filter bar the normal way switches back.
+
+## Saved queries
+
+`:save <name>` saves the active query (the raw query if one's active,
+otherwise whatever the filter bar currently builds) under `<name>`,
+independent of any time range. `:load <name>` restores it. `:queries`
+lists what's saved.
+
+Saved queries live in a plain JSON file at
+`$XDG_CONFIG_HOME/tailspin/queries.json` (falling back to
+`~/.config/tailspin/queries.json`) that you can hand-edit or pre-populate
+— tailspin only ever reads/writes `name` and `filter`; `description` is
+never set by the app, purely for your own reference:
+
+```json
+[
+  {
+    "name": "k8s-my-container",
+    "description": "optional, hand-edit only",
+    "filter": "resource.type=\"k8s_container\"\nresource.labels.cluster_name=\"my-cluster\""
+  }
+]
+```
 
 ## Development
 
