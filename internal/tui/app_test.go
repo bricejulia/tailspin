@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"cloud.google.com/go/logging"
 
 	"github.com/bricejulia/tailspin/internal/config"
@@ -284,8 +285,19 @@ func TestRenderHeaderNeverWraps(t *testing.T) {
 		"resource.labels.container_name=\"my-container\"\n" +
 		"resource.labels.namespace_name=\"my-namespace\""
 
-	if header := m.renderHeader(); strings.Contains(header, "\n") {
-		t.Errorf("renderHeader() contains a newline, want exactly one physical line: %q", header)
+	// The header is deliberately headerLines (2) physical lines — the
+	// project/status line, and a full-width line for the query — but a
+	// raw query's own embedded newlines (or a multi-line notice) must
+	// never grow it past exactly that, or the footer gets pushed off
+	// the bottom of the screen (still there, just scrolled out of view).
+	lines := strings.Split(m.renderHeader(), "\n")
+	if len(lines) != headerLines {
+		t.Fatalf("renderHeader() produced %d lines, want exactly %d: %q", len(lines), headerLines, lines)
+	}
+	for i, line := range lines {
+		if w := lipgloss.Width(line); w > m.width {
+			t.Errorf("header line %d is %d cols wide, want <= %d: %q", i, w, m.width, line)
+		}
 	}
 }
 

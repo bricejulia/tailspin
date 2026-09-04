@@ -480,9 +480,10 @@ func (m appModel) handleTailEvent(msg tailEventMsg) (tea.Model, tea.Cmd) {
 }
 
 // contentHeight is the terminal height available to the list/detail view,
-// after reserving one line each for the header and footer.
+// after reserving headerLines for the header (see renderHeader) and one
+// line for the footer.
 func (m appModel) contentHeight() int {
-	h := m.height - 2
+	h := m.height - headerLines - 1
 	if h < 0 {
 		return 0
 	}

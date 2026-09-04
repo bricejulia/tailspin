@@ -64,6 +64,13 @@ var (
 	detailLabelStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(colorAccent)
+
+	// plainStyle applies no color at all — the terminal's own default
+	// foreground, which reads with more contrast than headerMetaStyle's
+	// muted gray. Used for the header's query line: now that the query
+	// has a full-width line of its own rather than being squeezed into
+	// the middle of a busier line, it's the main thing being read there.
+	plainStyle = lipgloss.NewStyle()
 )
 
 // severityStyle returns the k9s-style status color for a log severity.
