@@ -325,3 +325,179 @@ var errFake = fakeErr("boom")
 type fakeErr string
 
 func (e fakeErr) Error() string { return string(e) }
+
+func TestFilterSubmittedTriggersHistogram(t *testing.T) {
+	fake := &gcplogtest.Client{Pages: []gcplog.Page{{}}}
+	m := New(fake, "test-project")
+	m.width = 80
+
+	_, cmd := m.Update(filterSubmittedMsg{filter: gcplog.FilterState{MinSeverity: logging.Error}})
+	if _, ok := findMsg[entriesLoadedMsg](cmd); !ok {
+		t.Error("expected a filter submission to still trigger a list fetch")
+	}
+	if _, ok := findMsg[histogramLoadedMsg](cmd); !ok {
+		t.Error("expected a filter submission to also trigger a histogram fetch")
+	}
+	if len(fake.HistogramCalls) != 1 {
+		t.Errorf("HistogramCalls = %d, want 1", len(fake.HistogramCalls))
+	}
+}
+
+func TestRefreshTriggersHistogram(t *testing.T) {
+	fake := &gcplogtest.Client{Pages: []gcplog.Page{{}}}
+	m := New(fake, "test-project")
+	m.width = 80
+
+	_, cmd := m.Update(textKey("r"))
+	if _, ok := findMsg[histogramLoadedMsg](cmd); !ok {
+		t.Error("expected the refresh key to trigger a histogram fetch")
+	}
+}
+
+func TestPaginationDoesNotTriggerHistogram(t *testing.T) {
+	// Pagination doesn't move the filter's time window, so it must not
+	// recompute the histogram — only triggerFetchAndHistogram call sites
+	// should.
+	fake := &gcplogtest.Client{Pages: []gcplog.Page{
+		{Entries: []gcplog.Entry{{Timestamp: time.Now()}}, NextPageToken: "next"},
+		{},
+	}}
+	m := New(fake, "test-project")
+	m.width = 80
+	loaded, _ := findMsg[entriesLoadedMsg](m.Init())
+	updated, _ := m.Update(loaded)
+	m = updated.(appModel)
+
+	_, cmd := m.Update(textKey("n")) // NextPage
+	if _, ok := findMsg[histogramLoadedMsg](cmd); ok {
+		t.Error("pagination should not trigger a histogram fetch")
+	}
+	if len(fake.HistogramCalls) != 0 {
+		t.Errorf("HistogramCalls = %d, want 0 after pagination", len(fake.HistogramCalls))
+	}
+}
+
+func TestWindowSizeMsgTriggersHistogramFetchOnce(t *testing.T) {
+	orig := histogramResizeDebounce
+	histogramResizeDebounce = time.Millisecond
+	defer func() { histogramResizeDebounce = orig }()
+
+	fake := &gcplogtest.Client{Pages: []gcplog.Page{{}}}
+	m := New(fake, "test-project")
+
+	// Both widths below gcplog.MaxHistogramBuckets, so bucket count == width
+	// — a bucket-count-changing resize, not just a pixel-width one.
+	m, cmd := settleHistogramResize(t, m, tea.WindowSizeMsg{Width: 40, Height: 24})
+	loaded, ok := findMsg[histogramLoadedMsg](cmd)
+	if !ok {
+		t.Fatal("expected the first WindowSizeMsg to eventually trigger a histogram fetch")
+	}
+	updated, _ := m.Update(loaded)
+	m = updated.(appModel)
+
+	// A second WindowSizeMsg with the same width shouldn't refetch.
+	m, cmd = settleHistogramResize(t, m, tea.WindowSizeMsg{Width: 40, Height: 30})
+	if _, ok := findMsg[histogramLoadedMsg](cmd); ok {
+		t.Error("a WindowSizeMsg with an unchanged width should not trigger another histogram fetch")
+	}
+
+	// A bucket-count-changing width should.
+	_, cmd = settleHistogramResize(t, m, tea.WindowSizeMsg{Width: 55, Height: 30})
+	if _, ok := findMsg[histogramLoadedMsg](cmd); !ok {
+		t.Error("a WindowSizeMsg with a changed bucket count should trigger another histogram fetch")
+	}
+}
+
+// TestWindowSizeMsgAboveBucketCapDoesNotRefetch covers the optimization
+// histogramBucketCount exists for: on any terminal wider than
+// gcplog.MaxHistogramBuckets columns, the bucket count is pinned at the
+// cap, so resizing within that range (dragging a maximized window's edge a
+// few columns, say) must not trigger a fresh histogram fetch at all.
+func TestWindowSizeMsgAboveBucketCapDoesNotRefetch(t *testing.T) {
+	orig := histogramResizeDebounce
+	histogramResizeDebounce = time.Millisecond
+	defer func() { histogramResizeDebounce = orig }()
+
+	fake := &gcplogtest.Client{Pages: []gcplog.Page{{}}}
+	m := New(fake, "test-project")
+
+	m, cmd := settleHistogramResize(t, m, tea.WindowSizeMsg{Width: 200, Height: 24})
+	loaded, ok := findMsg[histogramLoadedMsg](cmd)
+	if !ok {
+		t.Fatal("expected the first WindowSizeMsg to eventually trigger a histogram fetch")
+	}
+	updated, _ := m.Update(loaded)
+	m = updated.(appModel)
+
+	_, cmd = settleHistogramResize(t, m, tea.WindowSizeMsg{Width: 250, Height: 24})
+	if _, ok := findMsg[histogramLoadedMsg](cmd); ok {
+		t.Error("a resize that doesn't change the (capped) bucket count should not trigger another histogram fetch")
+	}
+}
+
+// settleHistogramResize applies a WindowSizeMsg and, if it scheduled a
+// debounced histogram refetch (see histogramResizeSettledMsg), synchronously
+// waits out the debounce (shrunk to ~0 by the caller — see
+// histogramResizeDebounce) and applies the resulting message too,
+// collapsing the two-step resize-then-fetch flow into one call.
+func settleHistogramResize(t *testing.T, m appModel, resize tea.WindowSizeMsg) (appModel, tea.Cmd) {
+	t.Helper()
+	updated, cmd := m.Update(resize)
+	m = updated.(appModel)
+	if cmd == nil {
+		return m, nil
+	}
+	settled, ok := findMsg[histogramResizeSettledMsg](cmd)
+	if !ok {
+		return m, cmd
+	}
+	updated, fetchCmd := m.Update(settled)
+	return updated.(appModel), fetchCmd
+}
+
+func TestHistogramRangeSelectedAppliesRangeAndStopsTail(t *testing.T) {
+	fake := &gcplogtest.Client{Pages: []gcplog.Page{{}}}
+	m := New(fake, "test-project")
+	m.width = 80
+	m.mode = modeTail
+	m.tailCancel = func() {}
+
+	since := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	until := since.Add(time.Hour)
+	updated, cmd := m.Update(histogramRangeSelectedMsg{since: since, until: until})
+	m2 := updated.(appModel)
+
+	if m2.mode != modeBrowse {
+		t.Errorf("mode = %v, want modeBrowse after a histogram range selection", m2.mode)
+	}
+	if !m2.filter.Since.Equal(since) || !m2.filter.Until.Equal(until) {
+		t.Errorf("filter = %+v, want Since=%v Until=%v", m2.filter, since, until)
+	}
+	if m2.tailCancel != nil {
+		t.Error("expected tailing to be stopped by a histogram range selection")
+	}
+	if _, ok := findMsg[entriesLoadedMsg](cmd); !ok {
+		t.Error("expected a histogram range selection to trigger a list fetch")
+	}
+}
+
+func TestShowsHistogramHiddenBelowMinWidth(t *testing.T) {
+	m := New(&gcplogtest.Client{}, "test-project")
+	m.width = minHistogramWidth - 1
+	if m.showsHistogram() {
+		t.Error("showsHistogram() = true below minHistogramWidth, want false")
+	}
+	m.width = minHistogramWidth
+	if !m.showsHistogram() {
+		t.Error("showsHistogram() = false at minHistogramWidth, want true")
+	}
+}
+
+func TestShowsHistogramHiddenInDetailMode(t *testing.T) {
+	m := New(&gcplogtest.Client{}, "test-project")
+	m.width = 80
+	m.mode = modeDetail
+	if m.showsHistogram() {
+		t.Error("showsHistogram() = true in modeDetail, want false")
+	}
+}

@@ -15,6 +15,7 @@ func helpText() string {
 		footerKeyStyle.Render("n / N") + "      next / previous page (fetches more once you're on the last loaded page)",
 		footerKeyStyle.Render("enter") + "      view entry detail",
 		footerKeyStyle.Render("/") + "          filter (severity, log name, text, time range)",
+		footerKeyStyle.Render("click/drag") + " on the histogram bars — set the time range to what you selected",
 		footerKeyStyle.Render(":") + "          command mode",
 		footerKeyStyle.Render("t") + "          tail (live streaming; space/p pauses, esc stops)",
 		footerKeyStyle.Render("w") + "          toggle wrap: by default every row is one line — h/l (0/$ for the ends)",

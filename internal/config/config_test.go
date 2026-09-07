@@ -90,3 +90,48 @@ func TestResolveProject_NoneConfigured(t *testing.T) {
 		t.Fatal("ResolveProject returned nil error, want an error")
 	}
 }
+
+func TestResolveReadQuota_FlagWins(t *testing.T) {
+	t.Setenv("TAILSPIN_READ_QUOTA", "30")
+
+	got, err := ResolveReadQuota(120)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 120 {
+		t.Errorf("ResolveReadQuota = %d, want 120", got)
+	}
+}
+
+func TestResolveReadQuota_EnvVar(t *testing.T) {
+	t.Setenv("TAILSPIN_READ_QUOTA", "30")
+
+	got, err := ResolveReadQuota(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 30 {
+		t.Errorf("ResolveReadQuota = %d, want 30", got)
+	}
+}
+
+func TestResolveReadQuota_FallsBackToDefault(t *testing.T) {
+	got, err := ResolveReadQuota(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != DefaultReadQuota {
+		t.Errorf("ResolveReadQuota = %d, want %d", got, DefaultReadQuota)
+	}
+}
+
+func TestResolveReadQuota_InvalidEnvVar(t *testing.T) {
+	for _, v := range []string{"not-a-number", "0", "-5"} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv("TAILSPIN_READ_QUOTA", v)
+			if _, err := ResolveReadQuota(0); err == nil {
+				t.Errorf("ResolveReadQuota with $TAILSPIN_READ_QUOTA=%q returned nil error, want an error", v)
+			}
+		})
+	}
+}

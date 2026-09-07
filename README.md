@@ -59,15 +59,31 @@ way `gcloud` does, in this order:
 2. `$GOOGLE_CLOUD_PROJECT` or `$TAILSPIN_PROJECT` environment variable
 3. gcloud's active configuration (`gcloud config set project <id>`)
 
+tailspin also paces its own Cloud Logging read requests (list pagination,
+the histogram's per-bucket queries — see Keybindings below) to a
+requests-per-minute budget, so normal use doesn't trip your project's read
+quota. It defaults to 60, Cloud Logging's own default quota; override it
+with `--read-quota <n>` or `$TAILSPIN_READ_QUOTA` if your project's quota is
+different (raised, or shared with other tools already consuming part of
+it) — a higher budget means a faster, more complete histogram; a lower one
+means a slower, more often partial one (flagged with a "data incomplete" /
+"~" marker rather than failing outright).
+
 ## Usage
 
 ```sh
-tailspin                        # uses the resolved default project
-tailspin --project my-project   # or pin one explicitly
+tailspin                                    # uses the resolved default project
+tailspin --project my-project               # or pin one explicitly
+tailspin --read-quota 300                   # raise the read-requests-per-minute budget
 tailspin --version
 ```
 
 ## Keybindings
+
+A stacked, severity-colored histogram sits above the log view (browse and
+tail modes, terminal permitting) — click a bar or drag across several to set
+the time range to what you selected and re-run the query, GCP Log
+Explorer-style.
 
 | Key | Action |
 |---|---|

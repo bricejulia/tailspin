@@ -23,9 +23,23 @@ type Client struct {
 	TailEvents []gcplog.TailEvent
 	TailErr    error
 
+	// HistogramResult/HistogramErr script Histogram's return. HistogramCalls
+	// records every call's filter and bucket count, in order, so a test can
+	// assert a histogram was (or wasn't) recomputed for a given state
+	// transition without needing real network access.
+	HistogramResult gcplog.HistogramResult
+	HistogramErr    error
+	HistogramCalls  []HistogramCall
+
 	Closed bool
 
 	listCalls int
+}
+
+// HistogramCall records one Histogram invocation.
+type HistogramCall struct {
+	Filter  gcplog.FilterState
+	Buckets int
 }
 
 var _ gcplog.Client = (*Client)(nil)
@@ -52,6 +66,14 @@ func (c *Client) TailEntries(_ context.Context, _ gcplog.FilterState) (<-chan gc
 	}
 	close(events)
 	return events, func() {}, nil
+}
+
+func (c *Client) Histogram(_ context.Context, f gcplog.FilterState, n int) (gcplog.HistogramResult, error) {
+	c.HistogramCalls = append(c.HistogramCalls, HistogramCall{Filter: f, Buckets: n})
+	if c.HistogramErr != nil {
+		return gcplog.HistogramResult{}, c.HistogramErr
+	}
+	return c.HistogramResult, nil
 }
 
 func (c *Client) Close() error {

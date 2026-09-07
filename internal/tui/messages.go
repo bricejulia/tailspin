@@ -1,6 +1,10 @@
 package tui
 
-import "github.com/bricejulia/tailspin/internal/gcplog"
+import (
+	"time"
+
+	"github.com/bricejulia/tailspin/internal/gcplog"
+)
 
 // entriesLoadedMsg reports the result of an (initial or paginated) list
 // fetch triggered by fetchPage.
@@ -34,4 +38,27 @@ type tailStartedMsg struct {
 type tailEventMsg struct {
 	gen   int
 	event gcplog.TailEvent
+}
+
+// histogramLoadedMsg reports the result of a Histogram fetch triggered by
+// fetchHistogramCmd.
+type histogramLoadedMsg struct {
+	result     gcplog.HistogramResult
+	forBuckets int // the bucket count the fetch was requested with
+	err        error
+}
+
+// histogramRangeSelectedMsg is emitted by histogramModel when a click or
+// completed drag on the chart selects a time range — the histogram's
+// equivalent of filterSubmittedMsg.
+type histogramRangeSelectedMsg struct {
+	since, until time.Time
+}
+
+// histogramResizeSettledMsg fires histogramResizeDebounce after a
+// WindowSizeMsg that changed the histogram's bucket count — see there. gen
+// is compared against appModel.histogramResizeGen so only the most recent
+// resize in a burst actually triggers a fetch.
+type histogramResizeSettledMsg struct {
+	gen int
 }
