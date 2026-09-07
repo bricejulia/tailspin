@@ -17,6 +17,10 @@ func (c *client) ListEntries(ctx context.Context, f FilterState, pageToken strin
 	)
 
 	pager := iterator.NewPager(it, int(pageSize), pageToken)
+
+	if err := c.readLimiter.Wait(ctx); err != nil {
+		return Page{}, fmt.Errorf("listing log entries for project %q: %w", c.project, err)
+	}
 	var sdkEntries []*logging.Entry
 	nextToken, err := pager.NextPage(&sdkEntries)
 	if err != nil && !errors.Is(err, iterator.Done) {

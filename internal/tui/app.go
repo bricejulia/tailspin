@@ -40,6 +40,24 @@ const pageSize = 50
 // network request can't hang the UI forever.
 const fetchTimeout = 15 * time.Second
 
+// histogramTimeout bounds a single Histogram call. Much longer than
+// fetchTimeout: every read request a histogram fetch makes is now paced by
+// the configured read-requests-per-minute budget (see
+// internal/config.ResolveReadQuota, gcplog.Client's readLimiter) rather than
+// fired freely, so a histogram spanning many buckets/pages can legitimately
+// take a while at the default 60/minute quota. A bucket that's still
+// waiting on that pacing when this expires just renders as incomplete (see
+// gcplog.HistogramBucket.Capped) rather than failing outright — this bounds
+// how long that takes to happen, not how much data can be fetched.
+const histogramTimeout = 2 * time.Minute
+
+// histogramResizeDebounce is how long a resize-triggered histogram refetch
+// waits for the terminal size to stop changing before actually firing (see
+// the WindowSizeMsg case) — a resize commonly delivers a burst of several
+// WindowSizeMsgs, and only the final size in that burst is worth a fetch.
+// A var, not a const, so tests can shrink it rather than actually waiting.
+var histogramResizeDebounce = 400 * time.Millisecond
+
 // defaultLookback is how far back browse mode looks by default, matching
 // logadmin's own default (see the FilterState.Since doc comment for why
 // this must be resolved once, not left for logadmin to inject per call).
@@ -59,6 +77,7 @@ type appModel struct {
 	command   commandModel
 	tail      tailModel
 	query     queryModel
+	histogram histogramModel
 	spinner   spinner.Model
 
 	// savedQueries is populated by ":queries" for modeQueries' View to
@@ -75,10 +94,35 @@ type appModel struct {
 	tailCancel func()
 	tailEvents <-chan gcplog.TailEvent
 
+	// histogramResizeGen identifies the latest resize-triggered histogram
+	// refetch requested; a histogramResizeSettledMsg carrying a stale gen
+	// (a later resize has since bumped it) is ignored — the debounce
+	// mechanism for the WindowSizeMsg case (see histogramResizeDebounce).
+	histogramResizeGen int
+
 	err    error  // fatal: takes over the whole screen (modeError)
 	notice string // transient: shown in the header, doesn't change mode
 
 	width, height int
+
+	// readQuota is the read-requests-per-minute budget passed to
+	// gcplog.NewClient when opening a new client for a ":project <id>"
+	// switch (see switchProjectCmd) — the client passed to New already has
+	// its own budget baked into it by the caller, so this only matters
+	// later. Set via SetReadQuota; zero falls back to
+	// config.DefaultReadQuota.
+	readQuota int
+}
+
+// SetReadQuota configures the read-requests-per-minute budget appModel uses
+// when opening a new gcplog.Client after a ":project <id>" switch. main.go
+// calls this once, right after New, with whatever config.ResolveReadQuota
+// resolved for the client New was given — kept as a separate setter rather
+// than a New parameter so every existing New(client, project) call site
+// (throughout this package's tests) didn't need updating for a value that,
+// for them, is irrelevant (they never switch projects).
+func (m *appModel) SetReadQuota(n int) {
+	m.readQuota = n
 }
 
 // New builds tailspin's top-level model for the given project and client.
@@ -101,6 +145,7 @@ func New(client gcplog.Client, project string) appModel {
 		command:   newCommandModel(),
 		tail:      newTailModel(),
 		query:     newQueryModel(),
+		histogram: newHistogramModel(),
 		// Line ("|/-\") is plain ASCII — no risk of a Braille/block
 		// glyph not rendering on some font or terminfo combination (see
 		// the ">" selection-marker doc comment in styles.go for a case
@@ -119,11 +164,31 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.list.SetSize(m.width, m.contentHeight())
+		// Column boundaries are about to shift under the cursor — discard
+		// rather than remap an in-progress drag, the same "resize just
+		// re-renders from current state" treatment everything else here gets.
+		m.histogram.cancelDrag()
+		m.list.SetSize(m.width, m.browseContentHeight())
 		m.detail.SetSize(m.width, m.contentHeight())
-		m.tail.SetSize(m.width, m.contentHeight())
+		m.tail.SetSize(m.width, m.browseContentHeight())
 		m.query.SetSize(m.width, m.contentHeight())
+		m.histogram.SetSize(m.width, histogramLines)
+		if m.showsHistogram() && histogramBucketCount(m.width) != m.histogram.fetchedForBuckets {
+			// Debounced, not fetched immediately: a terminal resize — a
+			// window drag, a multiplexer reflow — commonly delivers a burst
+			// of WindowSizeMsgs in quick succession, and each histogram
+			// fetch is itself several GCP API requests. Firing one per
+			// event risks tripping a project's read-request-rate quota for
+			// no benefit, since only the last size in the burst matters.
+			m.histogramResizeGen++
+			return m, tea.Tick(histogramResizeDebounce, func(time.Time) tea.Msg {
+				return histogramResizeSettledMsg{gen: m.histogramResizeGen}
+			})
+		}
 		return m, nil
+
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
@@ -138,7 +203,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.filter = msg.filter
 		m.notice = ""
 		m.mode = modeBrowse
-		return m.triggerFetch("", false)
+		return m.triggerFetchAndHistogram("", false)
 
 	case commandSubmittedMsg:
 		return m.handleCommand(msg.cmd)
@@ -154,6 +219,22 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tailEventMsg:
 		return m.handleTailEvent(msg)
+
+	case histogramLoadedMsg:
+		return m.handleHistogramLoaded(msg)
+
+	case histogramRangeSelectedMsg:
+		return m.handleHistogramRangeSelected(msg)
+
+	case histogramResizeSettledMsg:
+		if msg.gen != m.histogramResizeGen {
+			return m, nil // superseded by a later resize
+		}
+		if !m.showsHistogram() {
+			return m, nil // resized again, e.g. into a mode/width that hides it
+		}
+		m.histogram.setLoading()
+		return m, m.fetchHistogramCmd()
 
 	case spinner.TickMsg:
 		if !m.list.loading {
@@ -267,7 +348,7 @@ func (m appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.mode == modeBrowse || m.mode == modeError {
 			m.mode = modeBrowse
 			m.err = nil
-			return m.triggerFetch("", false)
+			return m.triggerFetchAndHistogram("", false)
 		}
 		return m, nil
 	case key.Matches(msg, keys.NextPage):
@@ -400,17 +481,22 @@ func (m appModel) handleProjectSwitched(msg projectSwitchedMsg) (tea.Model, tea.
 	m.client = msg.client
 	m.project = msg.project
 	m.filter = gcplog.FilterState{Since: time.Now().Add(-defaultLookback)}
+	m.histogram.reset() // the previous project's counts don't apply here
 	m.notice = ""
 	m.mode = modeBrowse
-	return m.triggerFetch("", false)
+	return m.triggerFetchAndHistogram("", false)
 }
 
 // startTail begins a new tail session: stops any previous one, clears the
-// tail view, and kicks off the async open-stream Cmd.
+// tail view, and kicks off the async open-stream Cmd. The histogram is
+// fetched once here too — a point-in-time snapshot up to "now" (see
+// fetchHistogramCmd), not live-recomputed per streamed entry.
 func (m appModel) startTail() (tea.Model, tea.Cmd) {
 	m = m.stopTail()
 	m.tail.reset()
-	return m, m.startTailCmd(m.tailGen)
+	m.histogram.reset()
+	m.histogram.setLoading()
+	return m, tea.Batch(m.startTailCmd(m.tailGen), m.fetchHistogramCmd())
 }
 
 // stopTail cancels the active tail stream, if any, and bumps tailGen so any
@@ -479,15 +565,141 @@ func (m appModel) handleTailEvent(msg tailEventMsg) (tea.Model, tea.Cmd) {
 	return m, waitForTailEvent(msg.gen, m.tailEvents)
 }
 
-// contentHeight is the terminal height available to the list/detail view,
+// contentHeight is the terminal height available to the detail/query view,
 // after reserving headerLines for the header (see renderHeader) and one
-// line for the footer.
+// line for the footer. detail and query never show the histogram (see
+// showsHistogram), so they get the full budget — browseContentHeight is the
+// one to use for anything that does.
 func (m appModel) contentHeight() int {
 	h := m.height - headerLines - 1
 	if h < 0 {
 		return 0
 	}
 	return h
+}
+
+// browseContentHeight is contentHeight() minus the histogram's fixed row
+// budget, whenever the histogram is actually shown (see showsHistogram) —
+// used by list and tail, the only two sub-models whose body is ever
+// rendered under the histogram.
+func (m appModel) browseContentHeight() int {
+	h := m.contentHeight()
+	if m.showsHistogram() {
+		h -= histogramLines
+	}
+	if h < 0 {
+		return 0
+	}
+	return h
+}
+
+// showsHistogram reports whether the current mode's body is the log
+// list/tail view (as opposed to detail, query, help, error, or the saved
+// queries screen) and the terminal is wide enough for a meaningful chart.
+func (m appModel) showsHistogram() bool {
+	switch m.mode {
+	case modeBrowse, modeFilterFocus, modeCommand, modeTail:
+		return m.width >= minHistogramWidth
+	default:
+		// modeDetail, modeQuery, modeHelp, modeError, modeQueries: body is
+		// never the list/tail view here, so there's nothing for the chart
+		// to sit above.
+		return false
+	}
+}
+
+// histogramRowRange returns the inclusive screen row range the histogram
+// occupies: right after the fixed-height header, for exactly histogramLines
+// rows — trivial since renderHeader always renders exactly headerLines
+// lines.
+func (m appModel) histogramRowRange() (top, bottom int) {
+	top = headerLines
+	return top, top + histogramLines - 1
+}
+
+// histogramColumnAt maps a screen x-coordinate to a bucket index (see
+// bucketForColumn — a bucket commonly spans more than one screen column,
+// since gcplog.MaxHistogramBuckets caps request volume well below a wide
+// terminal's column count).
+func (m appModel) histogramColumnAt(x int) int {
+	n := len(m.histogram.columns)
+	if n == 0 {
+		return 0
+	}
+	return bucketForColumn(min(max(x, 0), m.width-1), m.width, n)
+}
+
+// histogramBucketCount is how many buckets fetchHistogramCmd requests for
+// the given terminal width: enough to fill it column-for-column up to
+// gcplog.MaxHistogramBuckets, capped there regardless of width — beyond
+// that cap, a wider terminal just renders each bucket across more columns
+// (see bucketForColumn) rather than requesting more of them. Request
+// volume, not display resolution, is what the cap protects (see
+// gcplog.MaxHistogramBuckets' doc comment).
+func histogramBucketCount(width int) int {
+	if width < 1 {
+		return 0
+	}
+	return min(width, gcplog.MaxHistogramBuckets)
+}
+
+// handleMouse routes a mouse event to the histogram, the only
+// mouse-interactive part of the UI. Events outside the chart's row range,
+// or while it isn't shown at all, are ignored.
+func (m appModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if !m.showsHistogram() {
+		return m, nil
+	}
+	mouse := msg.Mouse()
+	top, bottom := m.histogramRowRange()
+
+	switch msg.(type) {
+	case tea.MouseClickMsg:
+		if mouse.Button != tea.MouseLeft || mouse.Y < top || mouse.Y > bottom {
+			return m, nil
+		}
+		m.histogram.beginDrag(m.histogramColumnAt(mouse.X))
+		return m, nil
+	case tea.MouseMotionMsg:
+		if !m.histogram.dragging {
+			return m, nil
+		}
+		m.histogram.updateDrag(m.histogramColumnAt(mouse.X))
+		return m, nil
+	case tea.MouseReleaseMsg:
+		if !m.histogram.dragging {
+			return m, nil
+		}
+		return m, m.histogram.endDrag(m.histogramColumnAt(mouse.X))
+	default:
+		// tea.MouseWheelMsg: not handled — reserved for a possible future
+		// zoom, not part of the drag-to-select gesture.
+		return m, nil
+	}
+}
+
+func (m appModel) handleHistogramLoaded(msg histogramLoadedMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.histogram.setErr(msg.err)
+		return m, nil
+	}
+	m.histogram.setResult(msg.result, msg.forBuckets)
+	return m, nil
+}
+
+// handleHistogramRangeSelected applies a time range picked by clicking or
+// dragging on the histogram. A bounded range is fundamentally incompatible
+// with tail's live, unbounded stream, so this stops tailing first — the
+// same tail-is-exclusive precedent keys.Back already sets (see there) —
+// before falling back to browse with the selected range applied.
+func (m appModel) handleHistogramRangeSelected(msg histogramRangeSelectedMsg) (tea.Model, tea.Cmd) {
+	if m.mode == modeTail {
+		m = m.stopTail()
+	}
+	m.filter.Since, m.filter.Until = msg.since, msg.until
+	m.notice = ""
+	m.mode = modeBrowse
+	return m.triggerFetchAndHistogram("", false)
 }
 
 // applyRawQuery installs raw as the active RawQuery, clears the mutually
@@ -507,7 +719,7 @@ func (m appModel) applyRawQuery(raw string) (appModel, tea.Cmd) {
 	}
 	m.notice = ""
 	m.mode = modeBrowse
-	return m.triggerFetch("", false)
+	return m.triggerFetchAndHistogram("", false)
 }
 
 // triggerFetch marks a fetch as in flight (so both listModel's own
@@ -520,6 +732,18 @@ func (m appModel) applyRawQuery(raw string) (appModel, tea.Cmd) {
 func (m appModel) triggerFetch(pageToken string, appending bool) (appModel, tea.Cmd) {
 	m.list.loading = true
 	return m, tea.Batch(m.fetchPage(pageToken, appending), m.spinner.Tick)
+}
+
+// triggerFetchAndHistogram is triggerFetch plus a histogram recompute — for
+// call sites where the filter/time-range itself changed (filterSubmittedMsg,
+// applyRawQuery, handleProjectSwitched, the Refresh key, and
+// histogramRangeSelectedMsg), as opposed to plain pagination or the lazy
+// near-bottom prefetch, which don't move the time window and so leave the
+// histogram alone (triggerFetch, not this).
+func (m appModel) triggerFetchAndHistogram(pageToken string, appending bool) (appModel, tea.Cmd) {
+	m, fetchCmd := m.triggerFetch(pageToken, appending)
+	m.histogram.setLoading()
+	return m, tea.Batch(fetchCmd, m.fetchHistogramCmd())
 }
 
 // fetchPage returns a Cmd that lists one page of entries. appending
@@ -535,13 +759,42 @@ func (m appModel) fetchPage(pageToken string, appending bool) tea.Cmd {
 	}
 }
 
+// fetchHistogramCmd returns a Cmd that computes histogram counts across the
+// current filter's range, requesting one bucket per terminal column so a
+// screen x-coordinate maps 1:1 to a bucket (see histogramColumnAt).
+func (m appModel) fetchHistogramCmd() tea.Cmd {
+	client, filter, buckets := m.client, m.filter, histogramBucketCount(m.width)
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), histogramTimeout)
+		defer cancel()
+		// Since/Until must both be resolved for Histogram (see its doc
+		// comment) even when filter itself legitimately leaves Until zero
+		// (unbounded — e.g. live tail). Resolved here, once, transiently,
+		// and never written back into filter itself — the same discipline
+		// applyRawQuery already follows for Since.
+		f := filter
+		if f.Since.IsZero() {
+			f.Since = time.Now().Add(-defaultLookback)
+		}
+		if f.Until.IsZero() {
+			f.Until = time.Now()
+		}
+		result, err := client.Histogram(ctx, f, buckets)
+		return histogramLoadedMsg{result: result, forBuckets: buckets, err: err}
+	}
+}
+
 // switchProjectCmd returns a Cmd that opens a new gcplog.Client for
 // project, driven from the ":project <id>" command.
 func (m appModel) switchProjectCmd(project string) tea.Cmd {
+	quota := m.readQuota
+	if quota <= 0 {
+		quota = config.DefaultReadQuota
+	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 		defer cancel()
-		client, err := gcplog.NewClient(ctx, project)
+		client, err := gcplog.NewClient(ctx, project, quota)
 		return projectSwitchedMsg{client: client, project: project, err: err}
 	}
 }
@@ -579,8 +832,19 @@ func (m appModel) View() tea.View {
 		footer = m.renderFooter()
 	}
 
-	content := m.renderHeader() + "\n" + body + "\n" + footer
+	histo := ""
+	if m.showsHistogram() {
+		histo = m.histogram.View() + "\n"
+	}
+
+	content := m.renderHeader() + "\n" + histo + body + "\n" + footer
 	v := tea.NewView(content)
 	v.AltScreen = true
+	if m.showsHistogram() {
+		// Only in modes that actually use it: other modes (detail, query,
+		// help) keep the terminal's native mouse-driven text selection/copy
+		// working instead of tailspin capturing every click.
+		v.MouseMode = tea.MouseModeCellMotion
+	}
 	return v
 }

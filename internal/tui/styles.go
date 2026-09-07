@@ -1,8 +1,12 @@
 package tui
 
 import (
+	"image/color"
+
 	"charm.land/lipgloss/v2"
 	"cloud.google.com/go/logging"
+
+	"github.com/bricejulia/tailspin/internal/gcplog"
 )
 
 // Palette: k9s-inspired — color is the primary status signal, chrome stays
@@ -73,18 +77,19 @@ var (
 	plainStyle = lipgloss.NewStyle()
 )
 
+// tierColor maps gcplog.ClassifySeverity's bands to the palette above — the
+// one place list rows, the detail view, and the histogram's stacked bars all
+// get their severity color from, so the three can never drift apart.
+var tierColor = [gcplog.NumSeverityTiers]color.Color{
+	gcplog.SeverityTierDefault: colorMuted,
+	gcplog.SeverityTierInfo:    colorInfo,
+	gcplog.SeverityTierWarning: colorWarning,
+	gcplog.SeverityTierError:   colorError,
+	gcplog.SeverityTierAlert:   colorAlert,
+}
+
 // severityStyle returns the k9s-style status color for a log severity.
 func severityStyle(s logging.Severity) lipgloss.Style {
-	switch {
-	case s >= logging.Alert:
-		return lipgloss.NewStyle().Bold(true).Foreground(colorAlert)
-	case s >= logging.Error:
-		return lipgloss.NewStyle().Bold(true).Foreground(colorError)
-	case s >= logging.Warning:
-		return lipgloss.NewStyle().Foreground(colorWarning)
-	case s >= logging.Info:
-		return lipgloss.NewStyle().Foreground(colorInfo)
-	default:
-		return lipgloss.NewStyle().Foreground(colorMuted)
-	}
+	tier := gcplog.ClassifySeverity(s)
+	return lipgloss.NewStyle().Bold(tier >= gcplog.SeverityTierError).Foreground(tierColor[tier])
 }
