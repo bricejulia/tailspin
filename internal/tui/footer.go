@@ -16,13 +16,15 @@ func (m appModel) renderFooter() string {
 	case modeDetail:
 		bindings = []key.Binding{keys.Up, keys.Down, keys.PageUp, keys.PageDown, keys.Back, keys.Quit}
 	case modeTail:
-		bindings = []key.Binding{pauseKey, keys.Up, keys.Down, keys.Back, keys.Quit}
+		bindings = []key.Binding{pauseKey, keys.Up, keys.Down, keys.Facets, keys.Back, keys.Quit}
 	case modeQuery:
 		bindings = []key.Binding{querySubmitKey, keys.Back}
 	case modeQueries:
 		bindings = []key.Binding{keys.Up, keys.Down, runQueryKey, keys.Back, keys.Quit}
+	case modeFacetFocus:
+		bindings = []key.Binding{keys.Up, keys.Down, facetApplyKey, keys.Refresh, keys.Facets, keys.Back}
 	default:
-		bindings = []key.Binding{keys.Up, keys.Down, pageNavKey, keys.Enter, keys.Filter, keys.Command, keys.Tail, keys.Wrap, keys.Refresh, keys.Help, keys.Quit}
+		bindings = []key.Binding{keys.Up, keys.Down, pageNavKey, keys.Enter, keys.Filter, keys.Facets, keys.Command, keys.Tail, keys.Wrap, keys.Refresh, keys.Help, keys.Quit}
 	}
 
 	var out strings.Builder

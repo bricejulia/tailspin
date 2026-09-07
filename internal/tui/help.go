@@ -15,6 +15,8 @@ func helpText() string {
 		footerKeyStyle.Render("n / N") + "      next / previous page (fetches more once you're on the last loaded page)",
 		footerKeyStyle.Render("enter") + "      view entry detail",
 		footerKeyStyle.Render("/") + "          filter (severity, log name, text, time range)",
+		footerKeyStyle.Render("f") + "          toggle the facets side panel (severity/log name/resource/label",
+		"           counts for the current range) — j/k select a value, enter applies it as a filter",
 		footerKeyStyle.Render("click/drag") + " on the histogram bars — set the time range to what you selected",
 		footerKeyStyle.Render(":") + "          command mode",
 		footerKeyStyle.Render("t") + "          tail (live streaming; space/p pauses, esc stops)",

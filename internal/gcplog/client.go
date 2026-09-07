@@ -42,6 +42,13 @@ type Client interface {
 	// bucket) rather than a single call — see the implementation's doc
 	// comment for why. f.Since and f.Until must both be resolved.
 	Histogram(ctx context.Context, f FilterState, n int) (HistogramResult, error)
+	// Facets computes a field-by-field breakdown (Severity, LogName,
+	// Resource, Labels) of every entry matching f across its full
+	// [Since, Until) range, for the facet side panel. Like Histogram, this
+	// is built out of several fully-paginated queries rather than a
+	// single call — see the implementation's doc comment. f.Since and
+	// f.Until must both be resolved.
+	Facets(ctx context.Context, f FilterState) (FacetsResult, error)
 	Close() error
 }
 

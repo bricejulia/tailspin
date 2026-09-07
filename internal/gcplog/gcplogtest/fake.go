@@ -31,6 +31,13 @@ type Client struct {
 	HistogramErr    error
 	HistogramCalls  []HistogramCall
 
+	// FacetsResult/FacetsErr script Facets' return. FacetsCalls records
+	// every call's filter, in order, so a test can assert facets were (or
+	// weren't) recomputed for a given state transition.
+	FacetsResult gcplog.FacetsResult
+	FacetsErr    error
+	FacetsCalls  []gcplog.FilterState
+
 	Closed bool
 
 	listCalls int
@@ -74,6 +81,14 @@ func (c *Client) Histogram(_ context.Context, f gcplog.FilterState, n int) (gcpl
 		return gcplog.HistogramResult{}, c.HistogramErr
 	}
 	return c.HistogramResult, nil
+}
+
+func (c *Client) Facets(_ context.Context, f gcplog.FilterState) (gcplog.FacetsResult, error) {
+	c.FacetsCalls = append(c.FacetsCalls, f)
+	if c.FacetsErr != nil {
+		return gcplog.FacetsResult{}, c.FacetsErr
+	}
+	return c.FacetsResult, nil
 }
 
 func (c *Client) Close() error {
