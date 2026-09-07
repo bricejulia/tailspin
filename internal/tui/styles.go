@@ -75,6 +75,15 @@ var (
 	// has a full-width line of its own rather than being squeezed into
 	// the middle of a busier line, it's the main thing being read there.
 	plainStyle = lipgloss.NewStyle()
+
+	// facetPanelStyle draws the facet side panel's left border — the one
+	// deliberate exception to "no boxes or borders" above, needed to
+	// visually separate the panel from the log list it sits beside now
+	// that the layout has its first horizontal split.
+	facetPanelStyle = lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder(), false, false, false, true).
+			BorderForeground(colorSubtle).
+			PaddingLeft(1)
 )
 
 // tierColor maps gcplog.ClassifySeverity's bands to the palette above — the

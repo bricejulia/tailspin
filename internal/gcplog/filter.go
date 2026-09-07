@@ -2,6 +2,7 @@ package gcplog
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -12,10 +13,23 @@ import (
 // Logging filter string (the same language `gcloud logging read` uses) by
 // Build. It has no dependency on I/O and is fully unit-testable on its own.
 type FilterState struct {
-	MinSeverity  Severity // zero value (logging.Default) means "no threshold"
+	MinSeverity Severity // zero value (logging.Default) means "no threshold"
+
+	// ExactSeverity, when set (non-Default), matches exactly that severity
+	// level rather than MinSeverity's threshold — set by the facet panel's
+	// severity click-to-filter. Wins over MinSeverity when both are set,
+	// the same "one field shadows the other" precedent RawQuery sets over
+	// the structured fields below.
+	ExactSeverity Severity
+
 	LogName      string
 	ResourceType string
 	FreeText     string
+
+	// Labels holds exact key=value clauses, ANDed together (and with
+	// everything else) — set by the facet panel's label click-to-filter.
+	// No UI offers anything but equality here.
+	Labels map[string]string
 
 	// RawQuery, when non-empty, is used verbatim as the query body
 	// instead of the four fields above (mutually exclusive, not
@@ -60,7 +74,10 @@ func (f FilterState) Query() string {
 	}
 
 	var clauses []string
-	if f.MinSeverity > logging.Default {
+	switch {
+	case f.ExactSeverity > logging.Default:
+		clauses = append(clauses, "severity="+strings.ToUpper(f.ExactSeverity.String()))
+	case f.MinSeverity > logging.Default:
 		// logging.Severity.String() renders "Warning", "Error", etc.
 		// (title case); the filter language's canonical enum spelling
 		// is uppercase ("WARNING", "ERROR").
@@ -79,6 +96,16 @@ func (f FilterState) Query() string {
 		// free-text function and correctly covers textPayload,
 		// jsonPayload's string fields, and labels in one go.
 		clauses = append(clauses, fmt.Sprintf("SEARCH(%s)", quote(f.FreeText)))
+	}
+	if len(f.Labels) > 0 {
+		keys := make([]string, 0, len(f.Labels))
+		for k := range f.Labels {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys) // deterministic Build() output
+		for _, k := range keys {
+			clauses = append(clauses, fmt.Sprintf("labels.%s=%s", quote(k), quote(f.Labels[k])))
+		}
 	}
 	return strings.Join(clauses, " AND ")
 }

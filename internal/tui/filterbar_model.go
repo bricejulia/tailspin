@@ -56,6 +56,15 @@ const (
 type filterBarModel struct {
 	focus filterField
 
+	// base is the FilterState this bar was last seeded from (see seed).
+	// build() starts from it and overrides only the fields the bar
+	// actually has controls for (MinSeverity, LogName, FreeText, Since),
+	// so fields it doesn't — ResourceType, Labels, ExactSeverity, Until,
+	// all only ever set by the facet panel — survive a bar submission
+	// unchanged instead of being silently wiped by a bar the user never
+	// touched them through.
+	base gcplog.FilterState
+
 	severityIdx int
 	sinceIdx    int
 	logName     textinput.Model
@@ -81,8 +90,11 @@ func newFilterBarModel() filterBarModel {
 }
 
 // seed primes the filter bar's fields from an existing FilterState (e.g.
-// when reopening the bar to tweak the currently-active filter).
+// when reopening the bar to tweak the currently-active filter), and stashes
+// the whole thing as base so build() can preserve whatever fields the bar
+// itself has no control over.
 func (m *filterBarModel) seed(f gcplog.FilterState) {
+	m.base = f
 	m.logName.SetValue(f.LogName)
 	m.freeText.SetValue(f.FreeText)
 	for i, opt := range severityOptions {
@@ -163,13 +175,21 @@ func (m filterBarModel) Update(msg tea.Msg) (filterBarModel, tea.Cmd) {
 	return m, cmd
 }
 
-// build renders the filter bar's current field values as a FilterState.
+// build renders the filter bar's current field values as a FilterState,
+// starting from base (see its doc comment) so fields the bar has no
+// control for survive a submit unchanged. RawQuery and Since are always
+// explicitly reset here rather than left as whatever base carried: a bar
+// submission means "I'm using structured filtering now" (RawQuery), and
+// Since is fully re-derived from the bar's own since-preset (no partial
+// carry-over of a prior absolute value).
 func (m filterBarModel) build() gcplog.FilterState {
-	f := gcplog.FilterState{
-		MinSeverity: severityOptions[m.severityIdx].value,
-		LogName:     m.logName.Value(),
-		FreeText:    m.freeText.Value(),
-	}
+	f := m.base
+	f.MinSeverity = severityOptions[m.severityIdx].value
+	f.ExactSeverity = 0 // a submitted threshold shouldn't be shadowed by a stale exact match from an earlier facet click
+	f.LogName = m.logName.Value()
+	f.FreeText = m.freeText.Value()
+	f.RawQuery = ""
+	f.Since = time.Time{}
 	if d := sinceOptions[m.sinceIdx].value; d > 0 {
 		f.Since = time.Now().Add(-d)
 	}

@@ -17,6 +17,7 @@ type keyMap struct {
 	Filter   key.Binding
 	Command  key.Binding
 	Tail     key.Binding
+	Facets   key.Binding
 	Wrap     key.Binding
 	Refresh  key.Binding
 	Help     key.Binding
@@ -41,6 +42,12 @@ var pageNavKey = key.NewBinding(key.WithKeys("n", "N"), key.WithHelp("n/N", "nex
 // Matching for modeQueries' own enter handling is done by literal string
 // comparison in handleKey, not against this binding.
 var runQueryKey = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "run"))
+
+// facetApplyKey is modeFacetFocus's footer-only display binding: same key
+// as keys.Enter, but "apply" reads better than keys.Enter's "view" there.
+// Matching is done by facetModel.Update against a literal "enter" string
+// comparison, not against this binding, the same split runQueryKey uses.
+var facetApplyKey = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "apply"))
 
 var keys = keyMap{
 	Up: key.NewBinding(
@@ -86,6 +93,10 @@ var keys = keyMap{
 	Tail: key.NewBinding(
 		key.WithKeys("t"),
 		key.WithHelp("t", "tail"),
+	),
+	Facets: key.NewBinding(
+		key.WithKeys("f"),
+		key.WithHelp("f", "facets"),
 	),
 	Wrap: key.NewBinding(
 		key.WithKeys("w"),

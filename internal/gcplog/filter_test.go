@@ -36,6 +36,31 @@ func TestFilterStateBuild(t *testing.T) {
 			want: `logName:"syslog"`,
 		},
 		{
+			name: "exact severity only",
+			f:    FilterState{ExactSeverity: logging.Warning},
+			want: `severity=WARNING`,
+		},
+		{
+			name: "exact severity wins over min severity",
+			f:    FilterState{MinSeverity: logging.Error, ExactSeverity: logging.Warning},
+			want: `severity=WARNING`,
+		},
+		{
+			name: "single label",
+			f:    FilterState{Labels: map[string]string{"env": "prod"}},
+			want: `labels."env"="prod"`,
+		},
+		{
+			name: "multiple labels sorted by key",
+			f:    FilterState{Labels: map[string]string{"zone": "us-east1", "env": "prod"}},
+			want: `labels."env"="prod" AND labels."zone"="us-east1"`,
+		},
+		{
+			name: "label value needing escaping",
+			f:    FilterState{Labels: map[string]string{"msg": `say "hi"`}},
+			want: `labels."msg"="say \"hi\""`,
+		},
+		{
 			name: "time range only",
 			f:    FilterState{Since: fixedTime, Until: fixedTime.Add(time.Hour)},
 			want: `timestamp>="2026-09-03T12:00:00Z" AND timestamp<="2026-09-03T13:00:00Z"`,
@@ -55,6 +80,19 @@ func TestFilterStateBuild(t *testing.T) {
 				Since:        fixedTime,
 			},
 			want: `severity>=ERROR AND logName:"syslog" AND resource.type="gce_instance" AND SEARCH("boom") AND timestamp>="2026-09-03T12:00:00Z"`,
+		},
+		{
+			name: "all fields combined including exact severity and labels",
+			f: FilterState{
+				MinSeverity:   logging.Error,
+				ExactSeverity: logging.Critical,
+				LogName:       "syslog",
+				ResourceType:  "gce_instance",
+				FreeText:      "boom",
+				Labels:        map[string]string{"env": "prod"},
+				Since:         fixedTime,
+			},
+			want: `severity=CRITICAL AND logName:"syslog" AND resource.type="gce_instance" AND SEARCH("boom") AND labels."env"="prod" AND timestamp>="2026-09-03T12:00:00Z"`,
 		},
 		{
 			name: "raw query alone",
