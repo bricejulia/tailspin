@@ -62,3 +62,14 @@ type histogramRangeSelectedMsg struct {
 type histogramResizeSettledMsg struct {
 	gen int
 }
+
+// facetsLoadedMsg reports the result of a Client.Facets fetch triggered by
+// fetchFacetsCmd. gen identifies which fetch this belongs to (see
+// appModel.facetGen), so a result superseded by a newer filter change or a
+// panel close/reopen is ignored on arrival — the same staleness guard
+// tailStartedMsg/tailEventMsg use for tailGen.
+type facetsLoadedMsg struct {
+	gen    int
+	result gcplog.FacetsResult
+	err    error
+}

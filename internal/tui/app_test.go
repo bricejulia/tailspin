@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -499,5 +500,282 @@ func TestShowsHistogramHiddenInDetailMode(t *testing.T) {
 	m.mode = modeDetail
 	if m.showsHistogram() {
 		t.Error("showsHistogram() = true in modeDetail, want false")
+	}
+}
+
+func TestFacetsKeyOpensPanelAndFetchesFullRange(t *testing.T) {
+	fake := &gcplogtest.Client{
+		FacetsResult: gcplog.FacetsResult{Facets: gcplog.Facets{
+			Severity: []gcplog.SeverityFacetCount{{Severity: logging.Warning, Count: 3}},
+		}},
+	}
+	m := New(fake, "test-project")
+	m.width = 80
+
+	updated, cmd := m.Update(textKey("f"))
+	m = updated.(appModel)
+	if m.mode != modeFacetFocus {
+		t.Errorf("mode = %v, want modeFacetFocus", m.mode)
+	}
+	if !m.facets.open {
+		t.Error("expected facets.open = true")
+	}
+
+	// FacetsCalls is only recorded once the Cmd returned by the f press
+	// actually runs (Cmds are lazy) — findMsg below is what runs it.
+	loaded, ok := findMsg[facetsLoadedMsg](cmd)
+	if !ok {
+		t.Fatal("expected pressing f to trigger a Client.Facets fetch")
+	}
+	if len(fake.FacetsCalls) != 1 {
+		t.Fatalf("FacetsCalls = %d, want 1", len(fake.FacetsCalls))
+	}
+	updated, _ = m.Update(loaded)
+	m = updated.(appModel)
+	if len(m.facets.facets.Severity) != 1 {
+		t.Errorf("facets.facets.Severity = %+v, want 1 entry", m.facets.facets.Severity)
+	}
+}
+
+func TestFacetsStaleGenerationIgnored(t *testing.T) {
+	m := New(&gcplogtest.Client{}, "test-project")
+	m.width = 80
+	m.facetGen = 5
+
+	updated, _ := m.Update(facetsLoadedMsg{gen: 3, result: gcplog.FacetsResult{Facets: sampleFacets()}})
+	m2 := updated.(appModel)
+	if len(m2.facets.rows) != 0 {
+		t.Errorf("expected a stale-gen facetsLoadedMsg to be ignored, got rows=%+v", m2.facets.rows)
+	}
+}
+
+func TestFacetsKeyOutsideBrowseOrTailIsNoop(t *testing.T) {
+	fake := &gcplogtest.Client{}
+	m := New(fake, "test-project")
+	m.width = 80
+	m.mode = modeDetail
+
+	updated, _ := m.Update(textKey("f"))
+	m2 := updated.(appModel)
+	if m2.facets.open || m2.mode != modeDetail {
+		t.Errorf("expected f to be a no-op outside browse/tail, got open=%v mode=%v", m2.facets.open, m2.mode)
+	}
+	if len(fake.FacetsCalls) != 0 {
+		t.Errorf("FacetsCalls = %d, want 0", len(fake.FacetsCalls))
+	}
+}
+
+func TestFacetsSecondPressWhileFocusedCloses(t *testing.T) {
+	fake := &gcplogtest.Client{Pages: []gcplog.Page{{}}}
+	m := New(fake, "test-project")
+	m.width = 80
+
+	updated, _ := m.Update(textKey("f"))
+	m = updated.(appModel)
+	if !m.facets.open {
+		t.Fatal("expected facets to be open after the first f press")
+	}
+
+	updated, _ = m.Update(textKey("f"))
+	m = updated.(appModel)
+	if m.facets.open {
+		t.Error("expected a second f press while focused to close the panel")
+	}
+	if m.mode != modeBrowse {
+		t.Errorf("mode = %v, want modeBrowse after closing", m.mode)
+	}
+}
+
+func TestFacetsEscUnfocusesWithoutClosing(t *testing.T) {
+	fake := &gcplogtest.Client{}
+	m := New(fake, "test-project")
+	m.width = 80
+
+	updated, _ := m.Update(textKey("f"))
+	m = updated.(appModel)
+
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = updated.(appModel)
+	if !m.facets.open {
+		t.Error("esc should not close the panel, only unfocus it")
+	}
+	if m.mode != modeBrowse {
+		t.Errorf("mode = %v, want modeBrowse after esc", m.mode)
+	}
+
+	// Pressing f again should just refocus, not refetch.
+	fake.FacetsCalls = nil
+	updated, _ = m.Update(textKey("f"))
+	m = updated.(appModel)
+	if m.mode != modeFacetFocus {
+		t.Errorf("mode = %v, want modeFacetFocus after refocusing", m.mode)
+	}
+	if len(fake.FacetsCalls) != 0 {
+		t.Errorf("refocusing an already-open panel should not refetch, got %d calls", len(fake.FacetsCalls))
+	}
+}
+
+func TestApplyFacetFilterSeverity(t *testing.T) {
+	fake := &gcplogtest.Client{Pages: []gcplog.Page{{}}}
+	m := New(fake, "test-project")
+	m.width = 80
+	m.mode = modeFacetFocus
+	m.facets.returnMode = modeBrowse
+	m.filter.MinSeverity = logging.Error
+
+	updated, cmd := m.Update(facetValueSelectedMsg{row: facetRow{field: facetFieldSeverity, severity: logging.Warning, count: 3}})
+	m = updated.(appModel)
+
+	if m.filter.ExactSeverity != logging.Warning {
+		t.Errorf("ExactSeverity = %v, want Warning", m.filter.ExactSeverity)
+	}
+	if m.filter.MinSeverity != 0 {
+		t.Errorf("MinSeverity = %v, want cleared", m.filter.MinSeverity)
+	}
+	if m.mode != modeBrowse {
+		t.Errorf("mode = %v, want modeBrowse", m.mode)
+	}
+	if _, ok := findMsg[entriesLoadedMsg](cmd); !ok {
+		t.Error("expected applying a facet filter to trigger a list fetch")
+	}
+}
+
+func TestApplyFacetFilterLabelStacksAcrossKeys(t *testing.T) {
+	fake := &gcplogtest.Client{Pages: []gcplog.Page{{}}}
+	m := New(fake, "test-project")
+	m.width = 80
+	m.mode = modeFacetFocus
+	m.facets.returnMode = modeBrowse
+
+	updated, _ := m.Update(facetValueSelectedMsg{row: facetRow{field: facetFieldLabel, labelKey: "env", value: "prod"}})
+	m = updated.(appModel)
+	m.mode = modeFacetFocus // applying returns to modeBrowse; re-focus for the second click
+
+	updated, _ = m.Update(facetValueSelectedMsg{row: facetRow{field: facetFieldLabel, labelKey: "zone", value: "us-east1"}})
+	m = updated.(appModel)
+
+	want := map[string]string{"env": "prod", "zone": "us-east1"}
+	if !reflect.DeepEqual(m.filter.Labels, want) {
+		t.Errorf("Labels = %+v, want %+v (should stack, not replace)", m.filter.Labels, want)
+	}
+}
+
+func TestApplyFacetFilterResourceAndLogName(t *testing.T) {
+	fake := &gcplogtest.Client{Pages: []gcplog.Page{{}}}
+	m := New(fake, "test-project")
+	m.width = 80
+	m.mode = modeFacetFocus
+	m.facets.returnMode = modeBrowse
+
+	updated, _ := m.Update(facetValueSelectedMsg{row: facetRow{field: facetFieldResource, value: "k8s_container"}})
+	m = updated.(appModel)
+	if m.filter.ResourceType != "k8s_container" {
+		t.Errorf("ResourceType = %q, want k8s_container", m.filter.ResourceType)
+	}
+
+	m.mode = modeFacetFocus
+	updated, _ = m.Update(facetValueSelectedMsg{row: facetRow{field: facetFieldLogName, value: "syslog"}})
+	m = updated.(appModel)
+	if m.filter.LogName != "syslog" {
+		t.Errorf("LogName = %q, want syslog", m.filter.LogName)
+	}
+}
+
+func TestApplyFacetFilterFromTailRestartsTail(t *testing.T) {
+	fake := &gcplogtest.Client{}
+	m := New(fake, "test-project")
+	m.width = 80
+	m.mode = modeFacetFocus
+	m.facets.returnMode = modeTail
+	m.facets.open = true
+
+	updated, cmd := m.Update(facetValueSelectedMsg{row: facetRow{field: facetFieldResource, value: "gce_instance"}})
+	m = updated.(appModel)
+
+	if m.mode != modeTail {
+		t.Errorf("mode = %v, want modeTail", m.mode)
+	}
+	if m.filter.ResourceType != "gce_instance" {
+		t.Errorf("ResourceType = %q, want gce_instance", m.filter.ResourceType)
+	}
+	started, ok := findMsg[tailStartedMsg](cmd)
+	if !ok {
+		t.Fatal("expected applying a facet filter from tail to (re)start the tail stream")
+	}
+	updated, _ = m.Update(started)
+	m = updated.(appModel)
+	if m.tailCancel == nil {
+		t.Error("expected the tail stream to have been started")
+	}
+}
+
+// TestTailFacetsAggregateSynchronouslyWithoutFetch covers the tail-mode
+// facet path: counts come straight from the already-accumulated tail
+// buffer, with no Client.Facets call and no async fetch.
+func TestTailFacetsAggregateSynchronouslyWithoutFetch(t *testing.T) {
+	fake := &gcplogtest.Client{}
+	m := New(fake, "test-project")
+	m.width = 80
+	m.mode = modeTail
+	m.tail.entries = []gcplog.Entry{
+		{Severity: logging.Warning, LogName: "syslog"},
+		{Severity: logging.Warning, LogName: "syslog"},
+	}
+
+	updated, cmd := m.Update(textKey("f"))
+	m = updated.(appModel)
+
+	if !m.facets.open || m.mode != modeFacetFocus {
+		t.Fatalf("expected the panel to open and focus, got open=%v mode=%v", m.facets.open, m.mode)
+	}
+	if len(fake.FacetsCalls) != 0 {
+		t.Errorf("tail-mode facets should not call Client.Facets, got %d calls", len(fake.FacetsCalls))
+	}
+	if _, ok := findMsg[facetsLoadedMsg](cmd); ok {
+		t.Error("tail-mode facets should resolve synchronously, not via a Cmd")
+	}
+	if len(m.facets.facets.Severity) != 1 || m.facets.facets.Severity[0].Count != 2 {
+		t.Errorf("facets.facets.Severity = %+v, want one Warning entry with count 2", m.facets.facets.Severity)
+	}
+}
+
+// TestFilterBarPreservesFacetDerivedFieldsAcrossSubmission is the
+// regression test for filterBarModel.build()'s fix: submitting the filter
+// bar must not silently wipe fields it has no control over (ResourceType,
+// Labels, ExactSeverity) that a prior facet click set.
+func TestFilterBarPreservesFacetDerivedFieldsAcrossSubmission(t *testing.T) {
+	fake := &gcplogtest.Client{Pages: []gcplog.Page{{}}}
+	m := New(fake, "test-project")
+	m.width = 80
+	m.filter.ResourceType = "k8s_container"
+	m.filter.Labels = map[string]string{"env": "prod"}
+	m.filter.ExactSeverity = logging.Warning
+	m.filter.Until = time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+
+	// Open the bar (seeds it from m.filter) and submit unchanged.
+	updated, _ := m.Update(textKey("/"))
+	m = updated.(appModel)
+	updated, cmd := m.Update(textKey("enter"))
+	m = updated.(appModel)
+	submitted, ok := findMsg[filterSubmittedMsg](cmd)
+	if !ok {
+		t.Fatal("expected enter in the filter bar to submit")
+	}
+	updated, _ = m.Update(submitted)
+	m = updated.(appModel)
+
+	if m.filter.ResourceType != "k8s_container" {
+		t.Errorf("ResourceType = %q, want preserved k8s_container", m.filter.ResourceType)
+	}
+	if !reflect.DeepEqual(m.filter.Labels, map[string]string{"env": "prod"}) {
+		t.Errorf("Labels = %+v, want preserved", m.filter.Labels)
+	}
+	if !m.filter.Until.Equal(time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)) {
+		t.Errorf("Until = %v, want preserved", m.filter.Until)
+	}
+	// Submitting the bar still means "structured filtering now": a
+	// MinSeverity threshold submit clears any stale exact-match.
+	if m.filter.ExactSeverity != 0 {
+		t.Errorf("ExactSeverity = %v, want cleared by a bar submission", m.filter.ExactSeverity)
 	}
 }

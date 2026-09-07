@@ -12,6 +12,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/bricejulia/tailspin/internal/config"
 	"github.com/bricejulia/tailspin/internal/gcplog"
@@ -26,6 +27,7 @@ const (
 	modeBrowse mode = iota
 	modeDetail
 	modeFilterFocus
+	modeFacetFocus // the facet side panel has keyboard focus (see toggleFacets)
 	modeCommand
 	modeTail
 	modeHelp
@@ -50,6 +52,16 @@ const fetchTimeout = 15 * time.Second
 // gcplog.HistogramBucket.Capped) rather than failing outright — this bounds
 // how long that takes to happen, not how much data can be fetched.
 const histogramTimeout = 2 * time.Minute
+
+// facetsTimeout bounds a single Client.Facets call — see histogramTimeout's
+// doc comment above for why this needs to be much longer than fetchTimeout
+// now that every read request is paced by the configured read-quota
+// budget.
+const facetsTimeout = histogramTimeout
+
+// facetPanelWidth is the facet side panel's fixed column width whenever
+// it's open (see browseContentWidth).
+const facetPanelWidth = 34
 
 // histogramResizeDebounce is how long a resize-triggered histogram refetch
 // waits for the terminal size to stop changing before actually firing (see
@@ -78,6 +90,7 @@ type appModel struct {
 	tail      tailModel
 	query     queryModel
 	histogram histogramModel
+	facets    facetModel
 	spinner   spinner.Model
 
 	// savedQueries is populated by ":queries" for modeQueries' View to
@@ -99,6 +112,12 @@ type appModel struct {
 	// (a later resize has since bumped it) is ignored — the debounce
 	// mechanism for the WindowSizeMsg case (see histogramResizeDebounce).
 	histogramResizeGen int
+
+	// facetGen identifies the current facet fetch; a facetsLoadedMsg
+	// carrying a stale gen (the filter changed, or the panel was
+	// closed/reopened since) is ignored — the same staleness guard tailGen
+	// gives tailStartedMsg/tailEventMsg.
+	facetGen int
 
 	err    error  // fatal: takes over the whole screen (modeError)
 	notice string // transient: shown in the header, doesn't change mode
@@ -146,6 +165,7 @@ func New(client gcplog.Client, project string) appModel {
 		tail:      newTailModel(),
 		query:     newQueryModel(),
 		histogram: newHistogramModel(),
+		facets:    newFacetModel(),
 		// Line ("|/-\") is plain ASCII — no risk of a Braille/block
 		// glyph not rendering on some font or terminfo combination (see
 		// the ">" selection-marker doc comment in styles.go for a case
@@ -168,11 +188,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// rather than remap an in-progress drag, the same "resize just
 		// re-renders from current state" treatment everything else here gets.
 		m.histogram.cancelDrag()
-		m.list.SetSize(m.width, m.browseContentHeight())
-		m.detail.SetSize(m.width, m.contentHeight())
-		m.tail.SetSize(m.width, m.browseContentHeight())
-		m.query.SetSize(m.width, m.contentHeight())
-		m.histogram.SetSize(m.width, histogramLines)
+		m.applySizes()
 		if m.showsHistogram() && histogramBucketCount(m.width) != m.histogram.fetchedForBuckets {
 			// Debounced, not fetched immediately: a terminal resize — a
 			// window drag, a multiplexer reflow — commonly delivers a burst
@@ -236,6 +252,12 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.histogram.setLoading()
 		return m, m.fetchHistogramCmd()
 
+	case facetsLoadedMsg:
+		return m.handleFacetsLoaded(msg)
+
+	case facetValueSelectedMsg:
+		return m.applyFacetFilter(msg.row)
+
 	case spinner.TickMsg:
 		if !m.list.loading {
 			return m, nil // fetch already finished — let the animation stop
@@ -268,6 +290,22 @@ func (m appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.command, cmd = m.command.Update(msg)
+		return m, cmd
+
+	case modeFacetFocus:
+		switch {
+		case msg.String() == "esc" || msg.String() == "q":
+			// Unfocus only — the panel stays open, showing its last
+			// counts, until the toggle key closes it outright.
+			m.mode = m.facets.returnMode
+			return m, nil
+		case key.Matches(msg, keys.Facets):
+			return m.closeFacets()
+		case key.Matches(msg, keys.Refresh):
+			return m.triggerFacetFetch()
+		}
+		var cmd tea.Cmd
+		m.facets, cmd = m.facets.Update(msg)
 		return m, cmd
 
 	case modeQuery:
@@ -327,6 +365,11 @@ func (m appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Tail):
 		m.mode = modeTail
 		return m.startTail()
+	case key.Matches(msg, keys.Facets):
+		if m.mode == modeBrowse || m.mode == modeTail {
+			return m.openOrFocusFacets()
+		}
+		return m, nil
 	case key.Matches(msg, keys.Back):
 		if m.mode == modeTail {
 			m = m.stopTail()
@@ -482,6 +525,8 @@ func (m appModel) handleProjectSwitched(msg projectSwitchedMsg) (tea.Model, tea.
 	m.project = msg.project
 	m.filter = gcplog.FilterState{Since: time.Now().Add(-defaultLookback)}
 	m.histogram.reset() // the previous project's counts don't apply here
+	m.facets.reset()
+	m.facetGen++ // invalidate any facet fetch still in flight for the old project
 	m.notice = ""
 	m.mode = modeBrowse
 	return m.triggerFetchAndHistogram("", false)
@@ -490,12 +535,19 @@ func (m appModel) handleProjectSwitched(msg projectSwitchedMsg) (tea.Model, tea.
 // startTail begins a new tail session: stops any previous one, clears the
 // tail view, and kicks off the async open-stream Cmd. The histogram is
 // fetched once here too — a point-in-time snapshot up to "now" (see
-// fetchHistogramCmd), not live-recomputed per streamed entry.
+// fetchHistogramCmd), not live-recomputed per streamed entry. The facet
+// panel, if open, follows the same discipline (see facetSourceIsTail):
+// reset here rather than recomputed, since the tail buffer it would
+// aggregate over was just cleared too — the user refreshes it explicitly
+// (keys.Refresh) once new entries have streamed in.
 func (m appModel) startTail() (tea.Model, tea.Cmd) {
 	m = m.stopTail()
 	m.tail.reset()
 	m.histogram.reset()
 	m.histogram.setLoading()
+	if m.facets.open {
+		m.facets.reset()
+	}
 	return m, tea.Batch(m.startTailCmd(m.tailGen), m.fetchHistogramCmd())
 }
 
@@ -591,6 +643,39 @@ func (m appModel) browseContentHeight() int {
 		return 0
 	}
 	return h
+}
+
+// browseContentWidth is the terminal width available to the list/tail
+// body, after reserving facetPanelWidth for the facet side panel whenever
+// it's open (see toggleFacets) — the horizontal analog of
+// browseContentHeight's vertical reservation for the histogram. Floored
+// well above zero so a pathologically narrow terminal with the panel open
+// doesn't hand the list a negative or unusably tiny width.
+func (m appModel) browseContentWidth() int {
+	if !m.facets.open {
+		return m.width
+	}
+	w := m.width - facetPanelWidth - 1 // -1 for the panel's left border column
+	if w < 20 {
+		return 20
+	}
+	return w
+}
+
+// applySizes propagates the current terminal size, and whether the facet
+// panel is open, to every sub-model. Called both from the WindowSizeMsg
+// handler and from openOrFocusFacets/closeFacets, since opening or closing
+// the panel changes the list/tail width split immediately — it can't wait
+// for the next actual terminal resize.
+func (m *appModel) applySizes() {
+	m.list.SetSize(m.browseContentWidth(), m.browseContentHeight())
+	m.detail.SetSize(m.width, m.contentHeight())
+	m.tail.SetSize(m.browseContentWidth(), m.browseContentHeight())
+	m.query.SetSize(m.width, m.contentHeight())
+	m.histogram.SetSize(m.width, histogramLines)
+	if m.facets.open {
+		m.facets.SetSize(facetPanelWidth, m.browseContentHeight())
+	}
 }
 
 // showsHistogram reports whether the current mode's body is the log
@@ -702,6 +787,123 @@ func (m appModel) handleHistogramRangeSelected(msg histogramRangeSelectedMsg) (t
 	return m.triggerFetchAndHistogram("", false)
 }
 
+// openOrFocusFacets opens the facet panel (fetching fresh counts) if it's
+// currently closed, or just gives it keyboard focus if it's already open
+// but unfocused (e.g. the user pressed esc/q earlier without closing it
+// outright) — counts aren't stale in that case, so no refetch.
+func (m appModel) openOrFocusFacets() (appModel, tea.Cmd) {
+	wasOpen := m.facets.open
+	m.facets.open = true
+	m.facets.returnMode = m.mode
+	m.mode = modeFacetFocus
+	m.applySizes()
+	if wasOpen {
+		return m, nil
+	}
+	return m.triggerFacetFetch()
+}
+
+// closeFacets closes the facet panel outright and returns to whichever
+// mode was active before it was opened.
+func (m appModel) closeFacets() (appModel, tea.Cmd) {
+	m.facets.open = false
+	m.mode = m.facets.returnMode
+	m.applySizes()
+	return m, nil
+}
+
+// facetSourceIsTail reports whether the facet panel's data source is the
+// live tail buffer (tailModel.entries) rather than a fresh browse-mode
+// Client.Facets fetch — true both while actively tailing and while
+// focused on a panel that was opened from tail mode (facets.returnMode).
+func (m appModel) facetSourceIsTail() bool {
+	if m.mode == modeTail {
+		return true
+	}
+	return m.mode == modeFacetFocus && m.facets.returnMode == modeTail
+}
+
+// triggerFacetFetch (re)computes the facet panel's counts for whichever
+// source is currently active: a synchronous aggregate over the tail
+// buffer (facetSourceIsTail), or an async, paginated Client.Facets fetch
+// across the browse filter's full time range (see its doc comment for the
+// bounded-concurrency, rate-limited, capped-per-range strategy). The
+// last-good counts stay visible while a browse-mode fetch is in flight
+// (facetModel.setLoading), so reopening/refreshing doesn't flash the
+// panel blank.
+func (m appModel) triggerFacetFetch() (appModel, tea.Cmd) {
+	if m.facetSourceIsTail() {
+		m.facets.setResult(gcplog.BuildFacets(m.tail.entries), false)
+		return m, nil
+	}
+	m.facets.setLoading()
+	m.facetGen++
+	return m, m.fetchFacetsCmd(m.facetGen)
+}
+
+// fetchFacetsCmd returns a Cmd that computes facet counts across the
+// current filter's full time range via Client.Facets.
+func (m appModel) fetchFacetsCmd(gen int) tea.Cmd {
+	client, filter := m.client, m.filter
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), facetsTimeout)
+		defer cancel()
+		// Since/Until must both be resolved for Facets (see its doc
+		// comment), the same transient-resolution discipline
+		// fetchHistogramCmd already follows.
+		f := filter
+		if f.Since.IsZero() {
+			f.Since = time.Now().Add(-defaultLookback)
+		}
+		if f.Until.IsZero() {
+			f.Until = time.Now()
+		}
+		result, err := client.Facets(ctx, f)
+		return facetsLoadedMsg{gen: gen, result: result, err: err}
+	}
+}
+
+func (m appModel) handleFacetsLoaded(msg facetsLoadedMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != m.facetGen {
+		return m, nil // superseded by a newer filter change or panel close/reopen
+	}
+	if msg.err != nil {
+		m.facets.setErr(msg.err)
+		return m, nil
+	}
+	m.facets.setResult(msg.result.Facets, msg.result.Capped)
+	return m, nil
+}
+
+// applyFacetFilter narrows the active filter to the selected facet value
+// and re-runs the query — the facet panel's equivalent of
+// filterSubmittedMsg. Tail has no bounded result set to re-fetch, so it
+// restarts the stream (via startTail) instead of triggering a browse-mode
+// fetch; facets.returnMode (recorded when the panel was opened) says which
+// case this is.
+func (m appModel) applyFacetFilter(row facetRow) (tea.Model, tea.Cmd) {
+	switch row.field {
+	case facetFieldSeverity:
+		m.filter.ExactSeverity, m.filter.MinSeverity = row.severity, 0
+	case facetFieldLogName:
+		m.filter.LogName = row.value
+	case facetFieldResource:
+		m.filter.ResourceType = row.value
+	case facetFieldLabel:
+		if m.filter.Labels == nil {
+			m.filter.Labels = map[string]string{}
+		}
+		m.filter.Labels[row.labelKey] = row.value
+	}
+	m.notice = ""
+	if m.facets.returnMode == modeTail {
+		m.mode = modeTail
+		return m.startTail()
+	}
+	m.mode = modeBrowse
+	return m.triggerFetchAndHistogram("", false)
+}
+
 // applyRawQuery installs raw as the active RawQuery, clears the mutually
 // exclusive structured fields, and refetches from page 1. If Since is
 // currently zero (e.g. right after a bare :query with no filter bar ever
@@ -711,9 +913,11 @@ func (m appModel) handleHistogramRangeSelected(msg histogramRangeSelectedMsg) (t
 func (m appModel) applyRawQuery(raw string) (appModel, tea.Cmd) {
 	m.filter.RawQuery = strings.TrimSpace(raw)
 	m.filter.MinSeverity = 0
+	m.filter.ExactSeverity = 0
 	m.filter.LogName = ""
 	m.filter.ResourceType = ""
 	m.filter.FreeText = ""
+	m.filter.Labels = nil
 	if m.filter.Since.IsZero() {
 		m.filter.Since = time.Now().Add(-defaultLookback)
 	}
@@ -739,11 +943,20 @@ func (m appModel) triggerFetch(pageToken string, appending bool) (appModel, tea.
 // applyRawQuery, handleProjectSwitched, the Refresh key, and
 // histogramRangeSelectedMsg), as opposed to plain pagination or the lazy
 // near-bottom prefetch, which don't move the time window and so leave the
-// histogram alone (triggerFetch, not this).
+// histogram alone (triggerFetch, not this). The facet panel, if open,
+// piggybacks on the same call sites (via triggerFacetFetch) — every place
+// that already refreshes the list on a filter change refreshes facets for
+// free too, with no separate call sites to remember.
 func (m appModel) triggerFetchAndHistogram(pageToken string, appending bool) (appModel, tea.Cmd) {
 	m, fetchCmd := m.triggerFetch(pageToken, appending)
 	m.histogram.setLoading()
-	return m, tea.Batch(fetchCmd, m.fetchHistogramCmd())
+	cmds := []tea.Cmd{fetchCmd, m.fetchHistogramCmd()}
+	if m.facets.open {
+		var facetCmd tea.Cmd
+		m, facetCmd = m.triggerFacetFetch()
+		cmds = append(cmds, facetCmd)
+	}
+	return m, tea.Batch(cmds...)
 }
 
 // fetchPage returns a Cmd that lists one page of entries. appending
@@ -799,6 +1012,24 @@ func (m appModel) switchProjectCmd(project string) tea.Cmd {
 	}
 }
 
+// browseBody joins the log list with the facet side panel when it's open —
+// the codebase's first horizontal composition (see facetPanelStyle's doc
+// comment in styles.go for why it's also the first bordered element).
+func (m appModel) browseBody() string {
+	if !m.facets.open {
+		return m.list.View()
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, m.list.View(), facetPanelStyle.Render(m.facets.View()))
+}
+
+// tailBody is browseBody's tail-mode analog.
+func (m appModel) tailBody() string {
+	if !m.facets.open {
+		return m.tail.View()
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, m.tail.View(), facetPanelStyle.Render(m.facets.View()))
+}
+
 func (m appModel) View() tea.View {
 	var body string
 	switch m.mode {
@@ -806,20 +1037,18 @@ func (m appModel) View() tea.View {
 		body = errorStyle.Render("error: " + friendlyError(m.err))
 	case modeHelp:
 		body = helpText()
-	case modeFilterFocus:
-		body = m.list.View()
-	case modeCommand:
-		body = m.list.View()
+	case modeFilterFocus, modeCommand, modeFacetFocus:
+		body = m.browseBody()
 	case modeDetail:
 		body = m.detail.View()
 	case modeTail:
-		body = m.tail.View()
+		body = m.tailBody()
 	case modeQuery:
 		body = m.query.View()
 	case modeQueries:
 		body = m.queriesListText()
 	default:
-		body = m.list.View()
+		body = m.browseBody()
 	}
 
 	var footer string
