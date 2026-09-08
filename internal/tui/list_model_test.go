@@ -7,6 +7,8 @@ import (
 
 	"cloud.google.com/go/logging"
 
+	"charm.land/lipgloss/v2"
+
 	"github.com/bricejulia/tailspin/internal/gcplog"
 )
 
@@ -131,5 +133,29 @@ func TestListModelGotoPreviousPageAtStart(t *testing.T) {
 	m.gotoPreviousPage()
 	if m.selected != 0 {
 		t.Errorf("selected = %d, want 0 (clamped to the start of the only page)", m.selected)
+	}
+}
+
+// TestListModelEmptyViewFillsHeight guards against the empty-state message
+// collapsing to a single line: whatever renders after it (the footer)
+// should stay pinned to the bottom of the terminal, not float up right
+// underneath the header.
+func TestListModelEmptyViewFillsHeight(t *testing.T) {
+	m := newListModel()
+	m.SetSize(40, 12)
+
+	for _, tc := range []struct {
+		name    string
+		loading bool
+	}{
+		{name: "no matches"},
+		{name: "loading", loading: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m.loading = tc.loading
+			if got := lipgloss.Height(m.View()); got != m.height {
+				t.Errorf("Height(View()) = %d, want %d (the allocated box)", got, m.height)
+			}
+		})
 	}
 }
