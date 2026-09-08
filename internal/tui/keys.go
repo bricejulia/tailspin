@@ -6,22 +6,23 @@ import "charm.land/bubbles/v2/key"
 // reuse these bindings rather than hand-coding key strings, so the footer
 // hints and the actual handling never drift apart.
 type keyMap struct {
-	Up       key.Binding
-	Down     key.Binding
-	PageUp   key.Binding
-	PageDown key.Binding
-	NextPage key.Binding
-	PrevPage key.Binding
-	Enter    key.Binding
-	Back     key.Binding
-	Filter   key.Binding
-	Command  key.Binding
-	Tail     key.Binding
-	Facets   key.Binding
-	Wrap     key.Binding
-	Refresh  key.Binding
-	Help     key.Binding
-	Quit     key.Binding
+	Up        key.Binding
+	Down      key.Binding
+	PageUp    key.Binding
+	PageDown  key.Binding
+	NextPage  key.Binding
+	PrevPage  key.Binding
+	Enter     key.Binding
+	Back      key.Binding
+	Filter    key.Binding
+	Command   key.Binding
+	Tail      key.Binding
+	Facets    key.Binding
+	Histogram key.Binding
+	Wrap      key.Binding
+	Refresh   key.Binding
+	Help      key.Binding
+	Quit      key.Binding
 }
 
 // tabKey and shiftTabKey move focus between fields in the filter bar. They
@@ -97,6 +98,10 @@ var keys = keyMap{
 	Facets: key.NewBinding(
 		key.WithKeys("f"),
 		key.WithHelp("f", "facets"),
+	),
+	Histogram: key.NewBinding(
+		key.WithKeys("g"),
+		key.WithHelp("g", "graph"),
 	),
 	Wrap: key.NewBinding(
 		key.WithKeys("w"),

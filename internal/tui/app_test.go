@@ -331,6 +331,7 @@ func TestFilterSubmittedTriggersHistogram(t *testing.T) {
 	fake := &gcplogtest.Client{Pages: []gcplog.Page{{}}}
 	m := New(fake, "test-project")
 	m.width = 80
+	m.histogramVisible = true
 
 	_, cmd := m.Update(filterSubmittedMsg{filter: gcplog.FilterState{MinSeverity: logging.Error}})
 	if _, ok := findMsg[entriesLoadedMsg](cmd); !ok {
@@ -348,10 +349,25 @@ func TestRefreshTriggersHistogram(t *testing.T) {
 	fake := &gcplogtest.Client{Pages: []gcplog.Page{{}}}
 	m := New(fake, "test-project")
 	m.width = 80
+	m.histogramVisible = true
 
 	_, cmd := m.Update(textKey("r"))
 	if _, ok := findMsg[histogramLoadedMsg](cmd); !ok {
 		t.Error("expected the refresh key to trigger a histogram fetch")
+	}
+}
+
+func TestRefreshDoesNotFetchHistogramWhenHidden(t *testing.T) {
+	fake := &gcplogtest.Client{Pages: []gcplog.Page{{}}}
+	m := New(fake, "test-project")
+	m.width = 80 // histogramVisible left false — hidden by default
+
+	_, cmd := m.Update(textKey("r"))
+	if _, ok := findMsg[histogramLoadedMsg](cmd); ok {
+		t.Error("expected refresh not to fetch the histogram while it's hidden")
+	}
+	if len(fake.HistogramCalls) != 0 {
+		t.Errorf("HistogramCalls = %d, want 0 while the histogram is hidden", len(fake.HistogramCalls))
 	}
 }
 
@@ -365,6 +381,7 @@ func TestPaginationDoesNotTriggerHistogram(t *testing.T) {
 	}}
 	m := New(fake, "test-project")
 	m.width = 80
+	m.histogramVisible = true
 	loaded, _ := findMsg[entriesLoadedMsg](m.Init())
 	updated, _ := m.Update(loaded)
 	m = updated.(appModel)
@@ -385,6 +402,7 @@ func TestWindowSizeMsgTriggersHistogramFetchOnce(t *testing.T) {
 
 	fake := &gcplogtest.Client{Pages: []gcplog.Page{{}}}
 	m := New(fake, "test-project")
+	m.histogramVisible = true
 
 	// Both widths below gcplog.MaxHistogramBuckets, so bucket count == width
 	// — a bucket-count-changing resize, not just a pixel-width one.
@@ -421,6 +439,7 @@ func TestWindowSizeMsgAboveBucketCapDoesNotRefetch(t *testing.T) {
 
 	fake := &gcplogtest.Client{Pages: []gcplog.Page{{}}}
 	m := New(fake, "test-project")
+	m.histogramVisible = true
 
 	m, cmd := settleHistogramResize(t, m, tea.WindowSizeMsg{Width: 200, Height: 24})
 	loaded, ok := findMsg[histogramLoadedMsg](cmd)
@@ -484,6 +503,7 @@ func TestHistogramRangeSelectedAppliesRangeAndStopsTail(t *testing.T) {
 
 func TestShowsHistogramHiddenBelowMinWidth(t *testing.T) {
 	m := New(&gcplogtest.Client{}, "test-project")
+	m.histogramVisible = true
 	m.width = minHistogramWidth - 1
 	if m.showsHistogram() {
 		t.Error("showsHistogram() = true below minHistogramWidth, want false")
@@ -496,10 +516,75 @@ func TestShowsHistogramHiddenBelowMinWidth(t *testing.T) {
 
 func TestShowsHistogramHiddenInDetailMode(t *testing.T) {
 	m := New(&gcplogtest.Client{}, "test-project")
+	m.histogramVisible = true
 	m.width = 80
 	m.mode = modeDetail
 	if m.showsHistogram() {
 		t.Error("showsHistogram() = true in modeDetail, want false")
+	}
+}
+
+// TestShowsHistogramStaysVisibleInFacetFocus guards against a regression
+// where opening the facet side panel (modeFacetFocus) hid an
+// already-visible histogram — its body is still the list/tail view (see
+// browseBody), just with the panel open alongside it, the same as
+// modeFilterFocus/modeCommand already staying in showsHistogram's list.
+func TestShowsHistogramStaysVisibleInFacetFocus(t *testing.T) {
+	fake := &gcplogtest.Client{Pages: []gcplog.Page{{}}}
+	m := New(fake, "test-project")
+	m.width = 80
+	m.histogramVisible = true
+
+	updated, _ := m.Update(textKey("f"))
+	m = updated.(appModel)
+	if m.mode != modeFacetFocus {
+		t.Fatalf("mode = %v, want modeFacetFocus", m.mode)
+	}
+	if !m.showsHistogram() {
+		t.Error("showsHistogram() = false in modeFacetFocus, want true (it was visible before opening the panel)")
+	}
+}
+
+// TestShowsHistogramHiddenByDefault covers the default this whole toggle
+// exists for: even at a comfortable width in browse mode, a fresh appModel
+// must not show (or fetch) the histogram until the user opts in with
+// keys.Histogram — see toggleHistogram.
+func TestShowsHistogramHiddenByDefault(t *testing.T) {
+	m := New(&gcplogtest.Client{}, "test-project")
+	m.width = 80
+	if m.showsHistogram() {
+		t.Error("showsHistogram() = true for a fresh appModel, want false (hidden by default)")
+	}
+}
+
+// TestHistogramKeyTogglesVisibility covers keys.Histogram end-to-end:
+// pressing it in browse mode reveals the histogram and fetches counts for
+// it immediately (the same fetch-on-open treatment the facet panel gets),
+// and pressing it again just hides it — no fetch, no crash.
+func TestHistogramKeyTogglesVisibility(t *testing.T) {
+	fake := &gcplogtest.Client{Pages: []gcplog.Page{{}}}
+	m := New(fake, "test-project")
+	m.width = 80
+
+	updated, cmd := m.Update(textKey("g"))
+	m = updated.(appModel)
+	if !m.histogramVisible {
+		t.Error("expected the histogram key to reveal the histogram")
+	}
+	if _, ok := findMsg[histogramLoadedMsg](cmd); !ok {
+		t.Error("expected turning the histogram on to fetch fresh counts")
+	}
+	if len(fake.HistogramCalls) != 1 {
+		t.Errorf("HistogramCalls = %d, want 1 after revealing the histogram", len(fake.HistogramCalls))
+	}
+
+	updated, _ = m.Update(textKey("g"))
+	m = updated.(appModel)
+	if m.histogramVisible {
+		t.Error("expected a second press of the histogram key to hide it again")
+	}
+	if len(fake.HistogramCalls) != 1 {
+		t.Errorf("HistogramCalls = %d, want still 1 after hiding the histogram", len(fake.HistogramCalls))
 	}
 }
 

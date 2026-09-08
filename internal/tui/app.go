@@ -70,10 +70,13 @@ const facetPanelWidth = 34
 // A var, not a const, so tests can shrink it rather than actually waiting.
 var histogramResizeDebounce = 400 * time.Millisecond
 
-// defaultLookback is how far back browse mode looks by default, matching
-// logadmin's own default (see the FilterState.Since doc comment for why
-// this must be resolved once, not left for logadmin to inject per call).
-const defaultLookback = 24 * time.Hour
+// defaultLookback is how far back browse mode looks by default — the same
+// value the filter bar's "since" field starts on (see newFilterBarModel's
+// sinceIdx into sinceOptions, capped at 1d) rather than logadmin's own
+// (non-deterministic, uncapped) default; see the FilterState.Since doc
+// comment for why this must be resolved once, not left for logadmin to
+// inject per call.
+const defaultLookback = 5 * time.Minute
 
 // appModel is the top-level Bubble Tea model.
 type appModel struct {
@@ -118,6 +121,15 @@ type appModel struct {
 	// closed/reopened since) is ignored — the same staleness guard tailGen
 	// gives tailStartedMsg/tailEventMsg.
 	facetGen int
+
+	// histogramVisible is whether the histogram is shown at all (see
+	// showsHistogram, toggleHistogram, keys.Histogram) — false (hidden) by
+	// default, since it's a zero value: fetching it costs a paced
+	// Client.Histogram read request on every filter change/refresh/resize
+	// (see histogramTimeout), which not every project's read quota can
+	// spare unconditionally. The user opts in per session with the toggle
+	// key.
+	histogramVisible bool
 
 	err    error  // fatal: takes over the whole screen (modeError)
 	notice string // transient: shown in the header, doesn't change mode
@@ -370,6 +382,11 @@ func (m appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m.openOrFocusFacets()
 		}
 		return m, nil
+	case key.Matches(msg, keys.Histogram):
+		if m.mode == modeBrowse || m.mode == modeTail {
+			return m.toggleHistogram()
+		}
+		return m, nil
 	case key.Matches(msg, keys.Back):
 		if m.mode == modeTail {
 			m = m.stopTail()
@@ -544,11 +561,15 @@ func (m appModel) startTail() (tea.Model, tea.Cmd) {
 	m = m.stopTail()
 	m.tail.reset()
 	m.histogram.reset()
-	m.histogram.setLoading()
 	if m.facets.open {
 		m.facets.reset()
 	}
-	return m, tea.Batch(m.startTailCmd(m.tailGen), m.fetchHistogramCmd())
+	cmds := []tea.Cmd{m.startTailCmd(m.tailGen)}
+	if m.showsHistogram() {
+		m.histogram.setLoading()
+		cmds = append(cmds, m.fetchHistogramCmd())
+	}
+	return m, tea.Batch(cmds...)
 }
 
 // stopTail cancels the active tail stream, if any, and bumps tailGen so any
@@ -680,10 +701,21 @@ func (m *appModel) applySizes() {
 
 // showsHistogram reports whether the current mode's body is the log
 // list/tail view (as opposed to detail, query, help, error, or the saved
-// queries screen) and the terminal is wide enough for a meaningful chart.
+// queries screen), the terminal is wide enough for a meaningful chart, and
+// the user hasn't hidden it (see histogramVisible, keys.Histogram).
 func (m appModel) showsHistogram() bool {
+	if !m.histogramVisible {
+		return false
+	}
 	switch m.mode {
-	case modeBrowse, modeFilterFocus, modeCommand, modeTail:
+	case modeBrowse, modeFilterFocus, modeCommand, modeTail, modeFacetFocus:
+		// modeFacetFocus's body is still the list/tail view, just with the
+		// facet side panel open alongside it (see browseBody) — the same
+		// reason modeFilterFocus/modeCommand (the filter bar/command line
+		// taking the footer, not the body) stay in this list too. Without
+		// it, opening the facet panel while the histogram was showing
+		// would hide it, and closing the panel again wouldn't bring it
+		// back until something else happened to trigger a refetch.
 		return m.width >= minHistogramWidth
 	default:
 		// modeDetail, modeQuery, modeHelp, modeError, modeQueries: body is
@@ -691,6 +723,25 @@ func (m appModel) showsHistogram() bool {
 		// to sit above.
 		return false
 	}
+}
+
+// toggleHistogram shows or hides the histogram (keys.Histogram). Hidden by
+// default (histogramVisible's zero value) — every bucket it renders costs
+// a paced Client.Histogram read request (see histogramTimeout), and a
+// project running close to its read quota can't afford that spent
+// unconditionally on every filter change/refresh/resize. Turning it on
+// immediately fetches fresh counts for the active filter, the same
+// fetch-on-open treatment openOrFocusFacets gives the facet panel; turning
+// it off just hides the last-good chart — no in-flight fetch to cancel,
+// and whatever's already in flight simply lands unseen.
+func (m appModel) toggleHistogram() (appModel, tea.Cmd) {
+	m.histogramVisible = !m.histogramVisible
+	m.applySizes()
+	if !m.showsHistogram() {
+		return m, nil
+	}
+	m.histogram.setLoading()
+	return m, m.fetchHistogramCmd()
 }
 
 // histogramRowRange returns the inclusive screen row range the histogram
@@ -949,8 +1000,11 @@ func (m appModel) triggerFetch(pageToken string, appending bool) (appModel, tea.
 // free too, with no separate call sites to remember.
 func (m appModel) triggerFetchAndHistogram(pageToken string, appending bool) (appModel, tea.Cmd) {
 	m, fetchCmd := m.triggerFetch(pageToken, appending)
-	m.histogram.setLoading()
-	cmds := []tea.Cmd{fetchCmd, m.fetchHistogramCmd()}
+	cmds := []tea.Cmd{fetchCmd}
+	if m.showsHistogram() {
+		m.histogram.setLoading()
+		cmds = append(cmds, m.fetchHistogramCmd())
+	}
 	if m.facets.open {
 		var facetCmd tea.Cmd
 		m, facetCmd = m.triggerFacetFetch()
