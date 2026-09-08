@@ -405,10 +405,15 @@ func padToWidth(s string, width int) string {
 
 func (m listModel) View() string {
 	if len(m.entries) == 0 {
+		msg := "no log entries match the current filter"
 		if m.loading {
-			return statusStyle.Render("loading…")
+			msg = "loading…"
 		}
-		return statusStyle.Render("no log entries match the current filter")
+		// Pad to the full allocated box, same as viewport.View() does for
+		// its content — otherwise this collapses to one line and whatever
+		// follows (the footer) ends up right underneath it instead of
+		// pinned to the bottom of the terminal.
+		return lipgloss.NewStyle().Width(m.width).Height(m.height).Render(statusStyle.Render(msg))
 	}
 	return m.viewport.View()
 }

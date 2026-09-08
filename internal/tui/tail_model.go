@@ -4,6 +4,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/bricejulia/tailspin/internal/gcplog"
 )
@@ -87,7 +88,12 @@ func (m tailModel) Update(msg tea.Msg) tailModel {
 
 func (m tailModel) View() string {
 	if len(m.entries) == 0 {
-		return statusStyle.Render("waiting for log entries…")
+		// Pad to the full allocated box, same as viewport.View() does for
+		// its content — otherwise this collapses to one line and whatever
+		// follows (the footer) ends up right underneath it instead of
+		// pinned to the bottom of the terminal.
+		return lipgloss.NewStyle().Width(m.viewport.Width()).Height(m.viewport.Height()).
+			Render(statusStyle.Render("waiting for log entries…"))
 	}
 	return m.viewport.View()
 }
