@@ -18,9 +18,10 @@ func (c *client) ListEntries(ctx context.Context, f FilterState, pageToken strin
 
 	pager := iterator.NewPager(it, int(pageSize), pageToken)
 
-	if err := c.readLimiter.Wait(ctx); err != nil {
-		return Page{}, fmt.Errorf("listing log entries for project %q: %w", c.project, err)
-	}
+	// Every real RPC this NextPage call issues — possibly more than one,
+	// if assembling this page needs more than one server response — is
+	// paced by the gRPC interceptor NewClient installs on c.admin's
+	// connection (see ratelimit.go), not by an explicit Wait call here.
 	var sdkEntries []*logging.Entry
 	nextToken, err := pager.NextPage(&sdkEntries)
 	if err != nil && !errors.Is(err, iterator.Done) {
