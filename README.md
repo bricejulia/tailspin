@@ -80,10 +80,12 @@ tailspin --version
 
 ## Keybindings
 
-A stacked, severity-colored histogram sits above the log view (browse and
+A stacked, severity-colored histogram can sit above the log view (browse and
 tail modes, terminal permitting) — click a bar or drag across several to set
 the time range to what you selected and re-run the query, GCP Log
-Explorer-style.
+Explorer-style. It's hidden by default, since every bucket it renders is a
+paced Cloud Logging read request on top of your regular list/facet fetches
+(see Setup above); press `g` to toggle it on for the session.
 
 | Key | Action |
 |---|---|
@@ -95,6 +97,7 @@ Explorer-style.
 | `/` | Filter (severity, log name, free text, time range) |
 | `:` | Command mode (see below) |
 | `t` | Tail (live streaming) |
+| `g` | Toggle the histogram (hidden by default) |
 | `w` | Toggle wrap: by default every row is one line — `h`/`l` scrolls the table sideways to read the rest (`0`/`$` jump straight to the start/end); wrap instead reflows every row across as many lines as its message needs |
 | `r` | Refresh (re-run the current query from page 1) |
 | `?` | Help |

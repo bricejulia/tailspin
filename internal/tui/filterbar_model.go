@@ -27,16 +27,24 @@ var severityOptions = []struct {
 }
 
 // sinceOptions are the time-range presets cyclable in the filter bar's
-// "since" field. A zero duration means "all time" (no lower bound).
+// "since" field, capped at 1d — a wider range multiplies the read
+// requests a histogram/facet fetch over it costs (see histogramTimeout),
+// so there's no "all time" option here.
 var sinceOptions = []struct {
 	label string
 	value time.Duration
 }{
+	{"1m", time.Minute},
+	{"5m", 5 * time.Minute},
+	{"10m", 10 * time.Minute},
+	{"15m", 15 * time.Minute},
+	{"30m", 30 * time.Minute},
+	{"45m", 45 * time.Minute},
 	{"1h", time.Hour},
-	{"24h", 24 * time.Hour},
-	{"7d", 7 * 24 * time.Hour},
-	{"30d", 30 * 24 * time.Hour},
-	{"all", 0},
+	{"3h", 3 * time.Hour},
+	{"6h", 6 * time.Hour},
+	{"12h", 12 * time.Hour},
+	{"1d", 24 * time.Hour},
 }
 
 // filterField identifies which control in the filter bar has focus.
@@ -85,7 +93,7 @@ func newFilterBarModel() filterBarModel {
 	return filterBarModel{
 		logName:  logName,
 		freeText: freeText,
-		sinceIdx: 1, // 24h, matching browse mode's default lookback
+		sinceIdx: 1, // 5m, matching browse mode's default lookback
 	}
 }
 
