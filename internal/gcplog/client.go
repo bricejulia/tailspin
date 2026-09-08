@@ -7,11 +7,21 @@ package gcplog
 import (
 	"context"
 	"fmt"
+	"time"
 
 	apiv2 "cloud.google.com/go/logging/apiv2"
 	"cloud.google.com/go/logging/logadmin"
-	"golang.org/x/time/rate"
 )
+
+// readLimiterWindow is the trailing window client's readLimiter enforces
+// "at most readRequestsPerMinute requests" over — 60s, matching Cloud
+// Logging's own quota being stated "per minute". A var, not a const, so a
+// future test can shrink it, the same "production duration, test-shrinks-
+// it" idiom internal/tui/app.go's histogramResizeDebounce already uses —
+// though slidingWindowLimiter's own constructor also takes a window
+// directly, so ratelimit_test.go doesn't actually need to touch this var
+// to exercise a short window.
+var readLimiterWindow = 60 * time.Second
 
 // Page is one page of historical log entries.
 type Page struct {
@@ -63,12 +73,17 @@ type client struct {
 	admin   *logadmin.Client
 	stream  *apiv2.Client
 
-	// readLimiter paces every read RPC this Client issues — ListEntries
-	// pagination and Histogram's per-bucket queries — to at most
-	// readRequestsPerMinute per minute (see NewClient), so tailspin stays
+	// Read-request pacing lives entirely in the gRPC interceptor NewClient
+	// installs on admin's connection (see ratelimit.go and
+	// newReadLimiterDialOption) — every read RPC this Client issues
+	// (ListEntries pagination, Histogram/Facets' per-bucket/per-range
+	// queries, including any extra RPC the SDK's Pager fires internally
+	// beyond the first to assemble one logical page) is paced there, to at
+	// most readRequestsPerMinute per readLimiterWindow, so tailspin stays
 	// under Cloud Logging's own read quota instead of bursting until the
-	// API starts rejecting requests.
-	readLimiter *rate.Limiter
+	// API starts rejecting requests. Nothing here holds a reference to the
+	// limiter itself — the interceptor closure already captures it, and
+	// nothing in this package needs to reach it again after construction.
 }
 
 // NewClient creates a Client for the given GCP project, using Application
@@ -80,7 +95,20 @@ func NewClient(ctx context.Context, project string, readRequestsPerMinute int) (
 	if readRequestsPerMinute <= 0 {
 		return nil, fmt.Errorf("readRequestsPerMinute must be positive, got %d", readRequestsPerMinute)
 	}
-	admin, err := logadmin.NewClient(ctx, project)
+	// Installed once, here, at Dial time — not as a Wait() call sprinkled
+	// at each read call site — so it gates every real unary RPC admin
+	// issues, including ones a single Pager.NextPage() call triggers
+	// internally when assembling one logical page needs more than one
+	// server response (see ratelimit.go's rateLimitInterceptor doc
+	// comment). A quiet client still bursts through up to
+	// readRequestsPerMinute requests instantly (see slidingWindowLimiter's
+	// doc comment) — a typical histogram/facets query still drains most
+	// of a quiet budget in one quick burst, the same responsiveness the
+	// old token-bucket design wanted — but never more than that within
+	// any readLimiterWindow, unlike the old design's burst-on-top-of-
+	// refill overshoot.
+	_, readLimiterOpt := newReadLimiterDialOption(readRequestsPerMinute, readLimiterWindow)
+	admin, err := logadmin.NewClient(ctx, project, readLimiterOpt)
 	if err != nil {
 		return nil, fmt.Errorf("creating Cloud Logging client for project %q: %w", project, err)
 	}
@@ -93,23 +121,6 @@ func NewClient(ctx context.Context, project string, readRequestsPerMinute int) (
 		project: project,
 		admin:   admin,
 		stream:  stream,
-		// Burst == readRequestsPerMinute: the standard token-bucket
-		// modeling of an "N per minute" quota — a full minute's budget is
-		// available immediately after being idle, then sustained usage
-		// paces at readRequestsPerMinute/60 per second. This matters in
-		// practice: a burst of 1 (tried first) meant every single read
-		// request — across ListEntries pagination and every histogram
-		// bucket alike — was serialized a full 60/readRequestsPerMinute
-		// seconds apart with no exceptions, so even a typical histogram
-		// (tens of buckets, each usually needing just one page) took the
-		// better part of a minute at the default 60/minute quota — it
-		// wasn't hung, just so slow it read as stuck. Burst ==
-		// readRequestsPerMinute instead lets a typical histogram drain
-		// most or all of a quiet client's budget in one quick burst — the
-		// exact usage pattern a "requests per minute" quota is meant to
-		// allow — while still never exceeding readRequestsPerMinute
-		// sustained requests in any minute.
-		readLimiter: rate.NewLimiter(rate.Limit(float64(readRequestsPerMinute)/60), readRequestsPerMinute),
 	}, nil
 }
 

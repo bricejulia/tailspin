@@ -210,8 +210,9 @@ type FacetsResult struct {
 const (
 	// facetRangeConcurrency bounds how many time sub-ranges are tallied at
 	// once — the same overlapping-latency role histogramBucketConcurrency
-	// plays for Histogram (client.readLimiter, not this, is what actually
-	// bounds request *rate*).
+	// plays for Histogram (the gRPC interceptor NewClient installs on
+	// c.admin's connection, not this, is what actually bounds request
+	// *rate* — see ratelimit.go).
 	facetRangeConcurrency = histogramBucketConcurrency
 
 	// maxFacetEntriesPerRange caps how many entries a single sub-range's
@@ -281,9 +282,10 @@ func (c *client) Facets(ctx context.Context, f FilterState) (FacetsResult, error
 
 // tallyFacetRange pages through every entry matching f narrowed to
 // [start, end), tallying Severity/LogName/Resource/Labels, up to
-// maxFacetEntriesPerRange. Each page fetch is paced by c.readLimiter, one
-// Wait per NextPage call — the same "one Wait per read request" accounting
-// ListEntries and Histogram's tallyBucket both use.
+// maxFacetEntriesPerRange. Every underlying RPC this issues is paced by
+// the gRPC interceptor NewClient installs on c.admin's connection (see
+// ratelimit.go), including any extra RPC the SDK's Pager fires internally
+// beyond the first to assemble one logical page.
 func (c *client) tallyFacetRange(ctx context.Context, f FilterState, start, end time.Time) (agg FacetAggregator, capped bool, err error) {
 	rf := f
 	rf.Since, rf.Until = start, end
@@ -293,16 +295,13 @@ func (c *client) tallyFacetRange(ctx context.Context, f FilterState, start, end 
 
 	var total int
 	for {
-		if err := c.readLimiter.Wait(ctx); err != nil {
-			// Most commonly ctx expiring (facetsTimeout) while this
-			// sub-range was still queued behind readLimiter's pacing, not
-			// a real API failure — folded into Capped by the caller either
-			// way (see Facets' doc comment).
-			return agg, false, err
-		}
 		var page []*logging.Entry
 		nextToken, err := pager.NextPage(&page)
 		if err != nil {
+			// Most commonly ctx expiring (facetsTimeout) while this
+			// sub-range's RPCs were still queued behind the interceptor's
+			// pacing, not a genuine API error — folded into Capped by the
+			// caller either way (see Facets' doc comment).
 			return agg, false, fmt.Errorf("listing log entries for project %q: %w", c.project, err)
 		}
 		for _, e := range page {

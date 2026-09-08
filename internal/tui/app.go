@@ -999,6 +999,15 @@ func (m appModel) fetchHistogramCmd() tea.Cmd {
 
 // switchProjectCmd returns a Cmd that opens a new gcplog.Client for
 // project, driven from the ":project <id>" command.
+//
+// Note: this gives the new client a fresh read-rate-limiter budget (see
+// gcplog.NewClient), so rapid repeated ":project" switches — including
+// switching back to a project just switched away from — can momentarily
+// exceed the real GCP-side quota's rolling window even though each
+// individual client instance paces itself correctly. Accepted as a rare,
+// low-frequency edge case: a project switch is a deliberate, user-initiated
+// action, not the sustained per-session usage pattern the limiter is
+// designed to keep under quota.
 func (m appModel) switchProjectCmd(project string) tea.Cmd {
 	quota := m.readQuota
 	if quota <= 0 {

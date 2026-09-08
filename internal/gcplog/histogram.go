@@ -72,12 +72,12 @@ type HistogramResult struct {
 
 const (
 	// histogramBucketConcurrency bounds how many per-bucket queries are in
-	// flight at once. It no longer has to carry the read-quota-safety
-	// burden alone — client.readLimiter (see client.go) is what actually
-	// keeps total request *issuance* under a project's read quota,
-	// regardless of this value — so this is now purely about overlapping
-	// each bucket's RPC round-trip latency; it does not affect how many
-	// requests get made per minute.
+	// flight at once. It doesn't carry the read-quota-safety burden at all
+	// — the gRPC interceptor NewClient installs on c.admin's connection
+	// (see ratelimit.go) is what actually keeps total request *issuance*
+	// under a project's read quota, regardless of this value — so this is
+	// purely about overlapping each bucket's RPC round-trip latency; it
+	// does not affect how many requests get made per minute.
 	histogramBucketConcurrency = 4
 
 	// histogramMaxEntriesPerBucket caps how many entries a single bucket's
@@ -180,10 +180,12 @@ func bucketBounds(since, until time.Time, n int) []HistogramBucket {
 }
 
 // tallyBucket pages through every entry matching f narrowed to [start, end),
-// tallying counts by SeverityTier, up to histogramMaxEntriesPerBucket. Each
-// page fetch is paced by c.readLimiter, one Wait per NextPage call — an
-// approximation of "one read request" that matches how ListEntries counts
-// its own requests against the same limiter.
+// tallying counts by SeverityTier, up to histogramMaxEntriesPerBucket.
+// Every underlying RPC this issues — including any the SDK's Pager
+// internally fires beyond the first to assemble one logical page (see
+// ratelimit.go's rateLimitInterceptor doc comment) — is paced by the gRPC
+// interceptor NewClient installs on c.admin's connection, not by an
+// explicit Wait call here.
 func (c *client) tallyBucket(ctx context.Context, f FilterState, start, end time.Time) (counts [NumSeverityTiers]int64, capped bool, err error) {
 	bf := f
 	bf.Since, bf.Until = start, end
@@ -193,16 +195,13 @@ func (c *client) tallyBucket(ctx context.Context, f FilterState, start, end time
 
 	var total int64
 	for {
-		if err := c.readLimiter.Wait(ctx); err != nil {
-			// Most commonly ctx expiring (histogramTimeout) while this
-			// bucket was still queued behind readLimiter's pacing, not a
-			// real API failure — folded into Capped by the caller either
-			// way (see Histogram's doc comment).
-			return counts, false, err
-		}
 		var page []*logging.Entry
 		nextToken, err := pager.NextPage(&page)
 		if err != nil {
+			// Most commonly ctx expiring (histogramTimeout) while this
+			// bucket's RPCs were still queued behind the interceptor's
+			// pacing, not a genuine API error — folded into Capped by the
+			// caller either way (see Histogram's doc comment).
 			return counts, false, fmt.Errorf("listing log entries for project %q: %w", c.project, err)
 		}
 		for _, e := range page {
